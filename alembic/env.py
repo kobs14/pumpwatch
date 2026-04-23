@@ -5,6 +5,7 @@ from logging.config import fileConfig
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import pumpwatch.db.models  # noqa: F401  # registers all models on Base.metadata
 from alembic import context
 from pumpwatch.config import get_settings
 from pumpwatch.db.base import Base

@@ -1,5 +1,6 @@
 """Application configuration via pydantic-settings."""
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -25,6 +26,13 @@ class Settings(BaseSettings):
     PUMPFUN_BASE_URL: str = "https://frontend-api.pump.fun"
     PUMPFUN_RATE_LIMIT_PER_SEC: int = 8
     PUMPFUN_MAX_BATCH_SIZE: int = 30
+    PUMPFUN_TIMEOUT_SECONDS: int = 10
+    PUMPFUN_MAX_RETRY_ATTEMPTS: int = 5
+    PUMPFUN_USER_AGENT: str = "pumpwatch/0.1 (+https://github.com/kobs14/pumpwatch)"
+
+    # Alerting defaults (percentage-point buffers and spike-detection k)
+    WARNING_BUFFER_PCT_DEFAULT: Decimal = Decimal("5.00")
+    VOLUME_SPIKE_K_DEFAULT: Decimal = Decimal("3.00")
 
     # Scheduler priority tiers (seconds between polls)
     PRIORITY_TICK_HIGH_SECONDS: int = 3

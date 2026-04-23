@@ -5,10 +5,10 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 1
-**Last Session Completed:** Session 1 — Project Scaffold & Infrastructure
-**Next Session:** Session 2 — Data Layer & Pump.fun Client
-**Last Updated:** 2026-04-22
+**Phase:** Post-Session 2
+**Last Session Completed:** Session 2 — Data Layer & Pump.fun Client
+**Next Session:** Session 3 — Telegram Bot, Commands, User Onboarding
+**Last Updated:** 2026-04-23
 
 ## Session Plan
 
@@ -16,8 +16,8 @@ It is updated at the end of every session.
 |----|-------------------------------------------------|---------|-------|
 | 0  | Bootstrap docs (CLAUDE.md, this file, etc.)     | ✅ done | Created by user before any code session |
 | 1  | Project Scaffold & Infrastructure               | ✅ done | Docker Compose, Postgres, Redis, package skeleton, tooling |
-| 2  | Data Layer & Pump.fun Client                    | ⬜ next | SQLAlchemy models, Alembic migration, PriceDataSource interface |
-| 3  | Telegram Bot, Commands, User Onboarding         | ⬜      | python-telegram-bot, /add /list /stop /settings /help |
+| 2  | Data Layer & Pump.fun Client                    | ✅ done | 6 models, initial migration, 6 repos, PumpFunClient + Fake, full test suite |
+| 3  | Telegram Bot, Commands, User Onboarding         | ⬜ next | python-telegram-bot, /add /list /stop /settings /help |
 | 4  | Scheduler & Batch Builder                       | ⬜      | Priority tiers, batch construction, Celery Beat |
 | 5  | Worker Pool & Price Ingestion                   | ⬜      | Celery workers, Redis hot cache, price.updated events |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ⬜      | Median+MAD detector, dedup, Telegram dispatch |
@@ -60,6 +60,28 @@ Session 1:
 - `tests/__init__.py` — tests package
 - `tests/conftest.py` — shared test fixtures
 - `tests/test_smoke.py` — smoke test
+
+Session 2:
+- `alembic/versions/f66a7128cab1_initial_schema.py` — creates all six tables
+- `src/pumpwatch/db/enums.py` — `Priority`, `SubscriptionStatus`, `AlertType` StrEnums
+- `src/pumpwatch/db/models/{__init__,user,token,subscription,price_snapshot,alert_sent,api_call_log}.py` — six SA 2.x ORM models
+- `src/pumpwatch/db/repos/{__init__,user,token,subscription,price_snapshot,alert,api_call_log}.py` — six repository classes
+- `src/pumpwatch/sources/{__init__,base,exceptions,fake,pumpfun}.py` — `PriceDataSource` Protocol, `TokenSnapshot` dataclass, `FakePriceDataSource`, `PumpFunClient`
+- `tests/db/__init__.py`, `tests/db/test_{user,token,subscription,price_snapshot,alert,api_call_log}_repo.py` — 29 repo tests against a real `pumpwatch_test` DB
+- `tests/sources/__init__.py`, `tests/sources/test_fake.py`, `tests/sources/test_pumpfun_client.py` — 19 source tests (fake + aioresponses-mocked client)
+- `tests/integration/__init__.py`, `tests/integration/test_fake_source_to_db.py` — end-to-end contract test
+
+Modified:
+- `pyproject.toml` (+aiohttp, tenacity, aiolimiter, python-dateutil, aioresponses, types-python-dateutil)
+- `uv.lock` regenerated
+- `src/pumpwatch/config.py` (+5 Settings fields)
+- `.env.example` (+5 new documented settings)
+- `alembic/env.py` (imports `pumpwatch.db.models` for metadata registration)
+- `tests/conftest.py` (rewritten with real test DB fixtures and SAVEPOINT rollback)
+
+## Risks Realized (Session 2)
+
+- **Pump.fun API is Cloudflare-blocked (HTTP 530) as of 2026-04-23.** Both live smoke-test addresses returned a Cloudflare "Origin Down" interstitial. The client's retry + `PumpFunUnavailableError` path is exercised correctly; mocked unit tests prove the happy path. `PriceDataSource` is the abstraction seam — Session 5 will either bypass the block (browser-like UA, session cookie) or swap to DexScreener. See `tasks/lessons.md` for the full note.
 
 ## Architectural Decisions Locked
 
