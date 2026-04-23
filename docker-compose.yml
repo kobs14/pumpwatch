@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pumpwatch
+      POSTGRES_PASSWORD: pumpwatch
+      POSTGRES_DB: pumpwatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pumpwatch_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pumpwatch -d pumpwatch"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - pumpwatch_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    command: python -m pumpwatch.main
+    volumes:
+      - ./src:/app/src
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pumpwatch; print(pumpwatch.__version__)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pumpwatch_pg_data:
+  pumpwatch_redis_data:
