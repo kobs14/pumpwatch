@@ -25,9 +25,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
     "mypy>=1.10",
-    "types-redis",
     "aioresponses>=0.7",
     "types-python-dateutil",
+    "fakeredis>=2.20",
 ]
 
 [tool.uv]

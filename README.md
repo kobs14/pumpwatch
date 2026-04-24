@@ -4,7 +4,7 @@ A production-grade, multi-user Telegram bot for monitoring Solana memecoin
 tokens via the Pump.fun API. Delivers real-time price threshold alerts and
 statistical volume-spike detection to users on their personal watchlists.
 
-> **Status:** Early development (Session 4 complete — scheduler + Celery workers online).
+> **Status:** Early development (Session 5 complete — worker price ingestion and `pw:price.updated` events online).
 
 ## Architecture (Planned)
 
@@ -76,6 +76,25 @@ processes would fire `fetch_batch` twice per tick. The `worker` service is
 horizontally scalable — queue routing (`default`, `high`, `medium`, `low`)
 is in place but replica counts are a Session 7 concern.
 
+### Worker write path (Session 5)
+
+Each `fetch_token` task performs three ordered steps:
+
+1. **Fetch** the token from the configured `PriceDataSource`
+   (`PRICE_SOURCE=pumpfun|fake`, via the factory in
+   `src/pumpwatch/sources/factory.py`). `PumpFunUnavailableError` is a
+   silent skip — the scheduler re-dispatches on the next tick.
+2. **Persist** a `PriceSnapshot` row in Postgres. This is the authoritative
+   step; everything downstream assumes this row exists.
+3. **Hot cache + pub-sub** (best-effort): `SET pw:price:<addr> <json>` with
+   a tier-varying TTL (HIGH=60s, MEDIUM=300s, LOW=900s), then `PUBLISH
+   pw:price.updated <json>`. A Redis outage warns but does not break the
+   snapshot write.
+
+The Redis namespace is `pw:*` throughout. Session 6's alert engine will
+subscribe to `pw:price.updated` and use a separate `pw:alert:*` prefix
+for dedup TTLs.
+
 ## Development
 
 Install dependencies locally (requires [uv](https://docs.astral.sh/uv/)):
@@ -118,10 +137,11 @@ pumpwatch/
 │       │   ├── session.py        # lazy-init async engine + sessionmaker
 │       │   ├── models/           # ORM models (User, Token, Subscription, ...)
 │       │   └── repos/            # per-table repository classes
-│       ├── sources/              # PriceDataSource protocol + PumpFunClient
+│       ├── sources/              # PriceDataSource protocol + PumpFunClient + factory
+│       ├── cache/                # Redis hot-cache + pub-sub helpers
 │       ├── bot/                  # Telegram bot: handlers, validators, app factory
 │       ├── celery_app.py         # Celery application + Beat schedule
-│       ├── scheduler/            # Celery tasks: batch builder, priority tiers
+│       ├── scheduler/            # Celery tasks: batch builder, priority tiers, fetch_token
 │       └── services/             # (Session 1 placeholders; real code lives above)
 └── tests/
     ├── conftest.py

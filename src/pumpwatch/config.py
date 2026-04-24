@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     # regardless of this setting.
     PUMPFUN_LOG_CALLS: bool = True
 
+    # Worker data path: which ``PriceDataSource`` to build at worker startup.
+    # ``fake`` returns an empty in-memory source (dev safeguard); real tests
+    # monkey-patch the factory directly.
+    PRICE_SOURCE: Literal["pumpfun", "fake"] = "pumpfun"
+
+    # Redis hot-cache TTL per subscription tier (seconds). HIGH is short so
+    # the cache always expires before the next poll-cadence overwrite would
+    # otherwise serve a stale value if the token stopped being polled.
+    PRICE_CACHE_TTL_HIGH_SECONDS: int = 60
+    PRICE_CACHE_TTL_MEDIUM_SECONDS: int = 300
+    PRICE_CACHE_TTL_LOW_SECONDS: int = 900
+
     # Telegram rate limits
     TELEGRAM_PER_CHAT_MSG_PER_SEC: int = 1
     TELEGRAM_GLOBAL_MSG_PER_SEC: int = 25

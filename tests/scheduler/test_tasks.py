@@ -2,21 +2,25 @@
 
 The tasks themselves wrap their async bodies in ``asyncio.run``, which
 cannot be called from inside pytest-asyncio's event loop. We hop each
-``.delay()`` call onto a worker thread via ``asyncio.to_thread``, mirroring
-the pattern ``tests/conftest.py`` uses for Alembic.
+``.delay()`` call onto a worker thread via ``asyncio.to_thread``,
+mirroring the pattern ``tests/conftest.py`` uses for Alembic.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
+import fakeredis
 import pytest
+import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from pumpwatch.cache.redis_client import PRICE_UPDATED_CHANNEL, cache_key_for
 from pumpwatch.db.enums import Priority, SubscriptionStatus
 from pumpwatch.db.models import PriceSnapshot, Subscription, Token, User
 from pumpwatch.scheduler import tasks as scheduler_tasks
@@ -39,6 +43,7 @@ async def _seed_one_active_sub(
     sm: async_sessionmaker[AsyncSession],
     *,
     address: str = "tokABC",
+    priority: Priority = Priority.HIGH,
 ) -> int:
     """Create one user + token + active subscription. Returns the sub id."""
     async with sm() as session, session.begin():
@@ -52,6 +57,7 @@ async def _seed_one_active_sub(
             token_address=address,
             growth_threshold_pct=Decimal("20"),
             stoploss_threshold_pct=Decimal("15"),
+            priority=priority,
         )
         session.add(sub)
         await session.flush()
@@ -69,8 +75,21 @@ def _fake_snapshot(address: str) -> TokenSnapshot:
         liquidity_usd=None,
         holder_count=None,
         source="fake",
-        fetched_at=datetime.now(UTC),
+        fetched_at=datetime(2026, 4, 24, 12, 0, tzinfo=UTC),
     )
+
+
+@pytest.fixture
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.Redis:
+    """Patch the worker-side Redis factory to return an in-memory fake.
+
+    Each test gets a fresh ``FakeAsyncRedis``; the factory returns the
+    same instance on every call within the test so assertions about
+    cache state can inspect it directly.
+    """
+    client = cast(aioredis.Redis, fakeredis.FakeAsyncRedis())
+    monkeypatch.setattr(scheduler_tasks, "_build_worker_redis", lambda: client)
+    return client
 
 
 async def test_fetch_batch_dispatches_one_task_per_unique_token(
@@ -182,28 +201,216 @@ async def test_fetch_batch_skips_stopped_subs(
     assert dispatched == []
 
 
-async def test_fetch_token_calls_source_and_returns_summary(
+async def test_fetch_token_persists_snapshot_cache_and_publish(
     scheduler_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,
 ) -> None:
-    fake = FakePriceDataSource({"tokABC": [_fake_snapshot("tokABC")]})
-    monkeypatch.setattr(scheduler_tasks, "_build_pumpfun_client", lambda _sm: fake)
+    """Happy path: snapshot row is written, cache populated, event published."""
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokHOT", priority=Priority.HIGH)
+    snap = _fake_snapshot("tokHOT")
+    fake = FakePriceDataSource({"tokHOT": [snap]})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
     monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
 
-    result = await _run_fetch_token("tokABC")
-    assert result == {"address": "tokABC", "found": True}
+    # Subscribe before we publish — Redis pub-sub is fire-and-forget.
+    pubsub = fake_redis.pubsub()
+    await pubsub.subscribe(PRICE_UPDATED_CHANNEL)
+    for _ in range(5):
+        confirm = await pubsub.get_message(ignore_subscribe_messages=False, timeout=0.05)
+        if confirm and confirm.get("type") == "subscribe":
+            break
+
+    result = await _run_fetch_token("tokHOT")
+    assert result == {"address": "tokHOT", "fetched": True, "tier": "high"}
+
+    async with scheduler_sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PriceSnapshot).where(PriceSnapshot.token_address == "tokHOT")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].market_cap_usd == Decimal("1000")
+        assert rows[0].source == "fake"
+
+    raw = await fake_redis.get(cache_key_for("tokHOT"))
+    assert raw is not None
+    cached = json.loads(raw)
+    assert cached["address"] == "tokHOT"
+    assert cached["tier"] == "high"
+    assert cached["market_cap_usd"] == "1000"
+
+    ttl = await fake_redis.ttl(cache_key_for("tokHOT"))
+    assert 0 < ttl <= 60  # HIGH TTL
+
+    # Drain up to 20 messages waiting for our publish.
+    published: dict[str, Any] | None = None
+    for _ in range(20):
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+        if msg is not None:
+            published = json.loads(msg["data"])
+            break
+        await asyncio.sleep(0.01)
+    assert published is not None, "expected a pw:price.updated publish"
+    assert published["address"] == "tokHOT"
+    assert published["tier"] == "high"
+    assert published["cache_key"] == cache_key_for("tokHOT")
+    await pubsub.aclose()  # type: ignore[no-untyped-call]
 
 
 async def test_fetch_token_returns_not_found_when_source_has_nothing(
     scheduler_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,  # noqa: ARG001 — prevents real Redis dial
 ) -> None:
     fake = FakePriceDataSource({})
-    monkeypatch.setattr(scheduler_tasks, "_build_pumpfun_client", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
     monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
 
     result = await _run_fetch_token("missing")
-    assert result == {"address": "missing", "found": False}
+    assert result == {"address": "missing", "fetched": False, "reason": "not_found"}
+
+
+async def test_fetch_token_silent_skip_on_unavailable(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,
+) -> None:
+    """PumpFunUnavailableError → warn + return fetched=False; no rows written."""
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokDOWN")
+    fake = FakePriceDataSource({}, fail_addresses={"tokDOWN"})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    result = await _run_fetch_token("tokDOWN")
+    assert result == {"address": "tokDOWN", "fetched": False, "error": "unavailable"}
+
+    async with scheduler_sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PriceSnapshot).where(PriceSnapshot.token_address == "tokDOWN")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert rows == []
+
+    assert await fake_redis.get(cache_key_for("tokDOWN")) is None
+
+
+async def test_fetch_token_cache_failure_does_not_break_snapshot(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,  # noqa: ARG001 — still used to avoid real Redis
+) -> None:
+    """Monkey-patched set_price_cache raises — snapshot must still commit."""
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokC1")
+    snap = _fake_snapshot("tokC1")
+    fake = FakePriceDataSource({"tokC1": [snap]})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("cache is sulking")
+
+    monkeypatch.setattr(scheduler_tasks, "set_price_cache", _boom)
+
+    result = await _run_fetch_token("tokC1")
+    assert result["fetched"] is True
+
+    async with scheduler_sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PriceSnapshot).where(PriceSnapshot.token_address == "tokC1")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+
+
+async def test_fetch_token_publish_failure_does_not_break_snapshot(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,
+) -> None:
+    """Monkey-patched publish_price_updated raises — snapshot still committed."""
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokC2")
+    snap = _fake_snapshot("tokC2")
+    fake = FakePriceDataSource({"tokC2": [snap]})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("publish is sulking")
+
+    monkeypatch.setattr(scheduler_tasks, "publish_price_updated", _boom)
+
+    result = await _run_fetch_token("tokC2")
+    assert result["fetched"] is True
+
+    async with scheduler_sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PriceSnapshot).where(PriceSnapshot.token_address == "tokC2")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+
+    # The cache still got written (only publish failed).
+    assert await fake_redis.get(cache_key_for("tokC2")) is not None
+
+
+async def test_fetch_token_tier_derives_from_live_priority(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,
+) -> None:
+    """Sub seeded as MEDIUM → cache TTL medium-range, payload tier='medium'."""
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokMED", priority=Priority.MEDIUM)
+    snap = _fake_snapshot("tokMED")
+    fake = FakePriceDataSource({"tokMED": [snap]})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    result = await _run_fetch_token("tokMED")
+    assert result["tier"] == "medium"
+
+    ttl = await fake_redis.ttl(cache_key_for("tokMED"))
+    assert 60 < ttl <= 300  # MEDIUM TTL, definitely not HIGH's 60
+
+
+async def test_fetch_token_tier_falls_back_to_low_without_subs(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,
+) -> None:
+    """Race: user stopped sub between dispatch and fetch → tier=LOW."""
+    async with scheduler_sessionmaker() as session, session.begin():
+        session.add(Token(address="tokORPH"))
+    snap = _fake_snapshot("tokORPH")
+    fake = FakePriceDataSource({"tokORPH": [snap]})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    result = await _run_fetch_token("tokORPH")
+    assert result["tier"] == "low"
+
+    ttl = await fake_redis.ttl(cache_key_for("tokORPH"))
+    assert 300 < ttl <= 900  # LOW TTL
 
 
 async def test_fetch_batch_uses_recent_snapshots_to_drive_priority(

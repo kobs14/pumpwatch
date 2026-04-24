@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from types import TracebackType
+from typing import Protocol, Self
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,4 +44,17 @@ class PriceDataSource(Protocol):
 
     async def close(self) -> None:
         """Release any owned resources (HTTP session, etc.). Idempotent."""
+        ...
+
+    async def __aenter__(self) -> Self:
+        """Enter an ``async with`` block; concrete sources may lazily open IO here."""
+        ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Exit the ``async with`` block; must call ``close()``."""
         ...

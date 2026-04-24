@@ -126,3 +126,29 @@ mistake or make a better choice.
 - **Lesson:** The `@celery.task(...)` decorator produces an untyped callable, triggering mypy's `untyped-decorator` rule in strict mode.
   **Context:** The first `# type: ignore[misc]` I tried was the wrong code; mypy reports the *error code* in the message but strict mode will ignore a mismatched suppression and re-flag.
   **Action:** Use `# type: ignore[untyped-decorator]` explicitly. Also added `kombu` to the existing `celery` mypy override since kombu ships no `py.typed` marker either.
+
+## Session 5 — 2026-04-24
+
+- **Lesson:** `redis.asyncio` pub-sub is fire-and-forget with zero replay; a subscriber that connects *after* a `PUBLISH` sees nothing. SUBSCRIBE confirmations also arrive as messages on the stream, so real tests need to drain them before asserting on the payload.
+  **Context:** The real-Redis integration test originally published, then subscribed — the message was silently dropped. Same shape will bite Session 6: the alert engine must be SUBSCRIBEd and past its confirmation frame *before* the first `PUBLISH pw:price.updated` the worker emits, or the event is lost.
+  **Action:** Integration test now builds the subscriber task first, waits for a SUBSCRIBE confirmation (`ready` event), and only then dispatches the Celery task. For Session 6 this means the alert engine's pub-sub connection must be established at service startup (before Beat fires anything); restarts during an active batch will lose messages for the restart window, which is acceptable because Postgres snapshot rows are the source of truth and can be replayed from there.
+
+- **Lesson:** `redis.asyncio.Redis` pools bind to the event loop they first issue IO on, so sharing a module-level client across `asyncio.run(...)` boundaries (one per Celery task body) is a footgun.
+  **Context:** My first cut cached a single async client via `get_redis()` (mirroring Session 3's `get_sessionmaker()`). That pattern is fine for long-running services with one loop, but Celery tasks wrap each invocation in a fresh `asyncio.run` — the pool from loop #1 would misbehave on loop #2.
+  **Action:** Split the API. `get_redis()` / `close_redis()` stay in `cache/redis_client.py` for long-running consumers (the Session 6 alert engine). The Celery task uses a per-invocation helper `_build_worker_redis()` that creates and `aclose()`s a fresh client inside its own loop. Tests monkey-patch that factory to inject a `fakeredis.FakeAsyncRedis()` instance.
+
+- **Lesson:** `types-redis` (external stubs) conflicts with `redis-py`'s own `py.typed` marker — the stub package wins in older versions and declares `Redis` as a generic with no `aclose()` attribute. Removing the external stubs is the right fix.
+  **Context:** `mypy --strict` on the new Session 5 code reported 29 errors against the stub-supplied `Redis[Any]` generic and missing `aclose` methods that exist at runtime. Modern `redis>=5.0` ships its own `py.typed`.
+  **Action:** Dropped `types-redis` from dev deps. One small remaining gap: `PubSub.aclose()` and `Redis.aclose()` are still partially untyped in the shipped stubs, so those callsites carry an inline `# type: ignore[no-untyped-call]`. Noted as a minor upstream follow-up, not a blocker.
+
+- **Lesson:** Defensive-outer-try for best-effort writes must wrap *client construction* too, not just the RPCs.
+  **Context:** My first draft of `_best_effort_publish` wrapped `set_price_cache` and `publish_price_updated` in try/excepts but built the Redis client outside the guard. A bad `REDIS_URL` or DNS blip during construction would escape and crash the data path.
+  **Action:** The client is now constructed inside its own try/except; `_build_worker_redis` failures log `worker.redis.connect_failed` and return early. Same lesson as Session 4's `ApiCallLog` outer wrap, one layer out. Session 6 should assume this pattern: any Redis touch from the data path gets a two-layer guard (construct + operate).
+
+- **Lesson:** Local `scheduler_sessionmaker` fixture defined in `tests/scheduler/conftest.py` doesn't leak into sibling packages — tests under `tests/integration/` can't see it.
+  **Context:** The new real-Redis integration test needed the same truncate-bracketed sessionmaker the scheduler tests use; it failed with "fixture 'scheduler_sessionmaker' not found" until I copied the fixture into the integration test file.
+  **Action:** Duplicated the small fixture (same shape as `tests/bot/conftest.py` duplicating for its own integration test in Session 3). Session 7 still owns the consolidation task — lifting these TRUNCATE-based fixtures into a single place.
+
+- **Lesson:** Pre-existing `celerybeat-schedule` file-permission bug in the `scheduler` compose service (Beat can't write its persistent-schedule GDBM file inside `/app`) is unrelated to Session 5 but blocks the full compose smoke.
+  **Context:** Bringing up `docker compose up -d scheduler worker` produced a CRITICAL Beat loop on the scheduler; the worker itself booted cleanly and processed a hand-dispatched `fetch_token` (successfully exercising the new silent-skip path against the still-CF-blocked Pump.fun endpoint).
+  **Action:** Not in scope for Session 5 — file a separate hardening item for Session 7 ("pin Beat state to a writable path or switch to a DB-backed schedule"). The compose smoke coverage is still meaningful: worker boots, registers tasks, consumes from Redis, routes through the Session 5 code path, returns the new `{"fetched": False, "error": "unavailable"}` shape.

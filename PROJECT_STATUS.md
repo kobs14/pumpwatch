@@ -5,9 +5,9 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 4
-**Last Session Completed:** Session 4 — Scheduler & Batch Builder
-**Next Session:** Session 5 — Worker Pool & Price Ingestion
+**Phase:** Post-Session 5
+**Last Session Completed:** Session 5 — Worker Pool & Price Ingestion
+**Next Session:** Session 6 — Alert Engine: Thresholds + Volume Spike
 **Last Updated:** 2026-04-24
 
 ## Session Plan
@@ -19,7 +19,7 @@ It is updated at the end of every session.
 | 2  | Data Layer & Pump.fun Client                    | ✅ done | 6 models, initial migration, 6 repos, PumpFunClient + Fake, full test suite |
 | 3  | Telegram Bot, Commands, User Onboarding         | ✅ done | PTB v22 long-polling bot, /start /help /add /list /stop /settings, lazy-init db/session, user-settings migration, 37 new tests |
 | 4  | Scheduler & Batch Builder                       | ✅ done | Celery app + Beat, pure priority/batch modules, per-sub tier persistence, ApiCallLog wired into PumpFunClient, scheduler + worker compose services, 37 new tests |
-| 5  | Worker Pool & Price Ingestion                   | ⬜      | Celery workers, Redis hot cache, price.updated events |
+| 5  | Worker Pool & Price Ingestion                   | ✅ done | fetch_token writes PriceSnapshot + pw:price:<addr> hot cache (tier-varying TTL) + pw:price.updated pub-sub; PRICE_SOURCE setting + factory; silent-skip on PumpFunUnavailableError; best-effort cache/pub-sub; fakeredis unit + real-Redis integration tests (39 new) |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ⬜      | Median+MAD detector, dedup, Telegram dispatch |
 | 7  | Hardening: Observability, Error Handling, Scale | ⬜      | Prometheus, Grafana, dead-letter queue, load test |
 | 8  | Documentation, README, Deployment Guide         | ⬜      | Architecture diagrams, ADRs, deploy guide |
@@ -107,6 +107,13 @@ Session 4:
 - `tests/scheduler/__init__.py`, `conftest.py`, `test_priority.py`, `test_batch.py`, `test_tasks.py`
 - `tests/integration/test_scheduler_real_redis.py` — gated real-broker smoke test
 
+Session 5:
+- `src/pumpwatch/cache/__init__.py`, `src/pumpwatch/cache/redis_client.py` — lazy `get_redis()`/`close_redis()`, `pw:price:<addr>` + `pw:price.updated` constants, `set_price_cache`, `publish_price_updated`, `ttl_for_tier`
+- `src/pumpwatch/sources/factory.py` — `build_source(sessionmaker)` keyed on `Settings.PRICE_SOURCE`
+- `tests/cache/__init__.py`, `tests/cache/test_redis_client.py` — fakeredis unit tests for cache + pub-sub
+- `tests/sources/test_factory.py` — source factory tests
+- `tests/integration/test_worker_price_ingestion_real_redis.py` — gated real-Redis end-to-end
+
 Session 4 modified:
 - `pyproject.toml` (+celery>=5.3,<6; +redis>=5.0; +mypy override for celery/kombu)
 - `uv.lock` regenerated
@@ -159,6 +166,24 @@ These were decided during design and should not be revisited without an ADR:
     thresholds; the batch builder picks `max(priority)` across subs per
     token to drive dispatch routing. A token-level `priority_tier` column
     was considered and rejected to avoid duplicating state.
+13. **Redis roles.** Single Redis instance, four roles: Celery broker,
+    Celery result backend, hot cache (`pw:price:<addr>` flat JSON with
+    tier-varying TTL — HIGH=60s, MEDIUM=300s, LOW=900s), pub-sub
+    (`pw:price.updated` single global channel; payload includes
+    `{address, ts, source, tier, cache_key}` and subscribers filter
+    in-process). No further Redis roles without an ADR.
+14. **Fallback-source policy.** A `build_source(sessionmaker)` factory
+    gates on `Settings.PRICE_SOURCE` (values: `pumpfun`, `fake`). A real
+    DexScreener `PriceDataSource` implementation is deferred to Session 7
+    hardening; the factory seam is ready for a one-line addition.
+    `FakePriceDataSource` is dev-only; tests monkey-patch `_build_source`
+    in `scheduler/tasks.py` directly rather than flipping the setting.
+15. **Worker is subscription-agnostic.** The `fetch_token` worker writes a
+    `PriceSnapshot` row + hot cache + pub-sub event unconditionally when
+    the source returns data. It reads `Subscription.priority` only to
+    derive the cache TTL and the event `tier` field. User-mute,
+    quiet-hours, and `PAUSED` suppression all live at alert-dispatch
+    time in Session 6 — not in the worker.
 
 ## Known Risks / Watch Items
 
