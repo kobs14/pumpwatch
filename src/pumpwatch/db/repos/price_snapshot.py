@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,3 +55,33 @@ class PriceSnapshotRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def recent_per_token(
+        self,
+        token_addresses: Sequence[str],
+        limit: int = 20,
+        window: timedelta = timedelta(hours=1),
+    ) -> dict[str, list[PriceSnapshot]]:
+        """Return up to ``limit`` recent snapshots per token, keyed by address.
+
+        One round trip: pulls all snapshots in the last ``window`` for the
+        given addresses, then groups in Python and caps each group. The
+        time bound prevents pulling years of rows for a long-running token.
+        Empty input → empty dict (no query issued).
+        """
+        if not token_addresses:
+            return {}
+        cutoff = datetime.now(UTC) - window
+        stmt = (
+            select(PriceSnapshot)
+            .where(PriceSnapshot.token_address.in_(token_addresses))
+            .where(PriceSnapshot.ts >= cutoff)
+            .order_by(PriceSnapshot.token_address, PriceSnapshot.ts.desc())
+        )
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[PriceSnapshot]] = {}
+        for snap in result.scalars().all():
+            bucket = grouped.setdefault(snap.token_address, [])
+            if len(bucket) < limit:
+                bucket.append(snap)
+        return grouped

@@ -9,6 +9,7 @@ breaking change is a one-function fix.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from types import TracebackType
@@ -16,6 +17,7 @@ from typing import Any, Self
 
 import aiohttp
 from aiolimiter import AsyncLimiter
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -24,6 +26,7 @@ from tenacity import (
 )
 
 from pumpwatch.config import Settings, get_settings
+from pumpwatch.db.repos.api_call_log import ApiCallLogRepository
 from pumpwatch.logging import get_logger
 from pumpwatch.sources.base import TokenSnapshot
 from pumpwatch.sources.exceptions import PumpFunUnavailableError
@@ -99,11 +102,22 @@ class PumpFunClient:
 
     name: str = "pumpfun"
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        log_calls: bool = True,
+    ) -> None:
         self._settings = settings if settings is not None else get_settings()
         self._limiter = AsyncLimiter(self._settings.PUMPFUN_RATE_LIMIT_PER_SEC, time_period=1)
         self._semaphore = asyncio.Semaphore(self._settings.PUMPFUN_MAX_BATCH_SIZE)
         self._session: aiohttp.ClientSession | None = None
+        # Logging is opt-in: a sessionmaker must be supplied AND log_calls
+        # must be true. Without a sessionmaker the client is fully isolated
+        # from the DB (the path Session 2's tests exercise).
+        self._sessionmaker = sessionmaker
+        self._log_calls = log_calls and sessionmaker is not None
 
     async def __aenter__(self) -> Self:
         await self._ensure_session()
@@ -137,8 +151,40 @@ class PumpFunClient:
 
         Returns ``None`` if the coin is unknown upstream (404 or missing
         payload). Raises :class:`PumpFunUnavailableError` after retry
-        attempts are exhausted on transient failures.
+        attempts are exhausted on transient failures. Writes one summary
+        row to ``api_call_log`` per logical call (not per HTTP retry) when
+        a sessionmaker was passed to ``__init__``.
         """
+        started = time.perf_counter()
+        status_code: int = 0  # 0 = transport-level failure (no HTTP response)
+        error: str | None = None
+        success = False
+        try:
+            snap = await self._fetch_one_with_retries(address)
+            status_code = 200 if snap is not None else 404
+            success = True
+            return snap
+        except PumpFunUnavailableError as exc:
+            error = str(exc)
+            raise
+        finally:
+            if self._log_calls:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                try:
+                    await self._log_call(
+                        endpoint=f"/coins/{_redact(address)}",
+                        status_code=status_code,
+                        latency_ms=latency_ms,
+                        success=success,
+                        error=error,
+                    )
+                except Exception as log_exc:
+                    # The data path must never be broken by the observability
+                    # path. A logging bug is a warning, not a caller-visible
+                    # exception.
+                    _log.warning("pumpfun.log_call.outer_failed", error=str(log_exc))
+
+    async def _fetch_one_with_retries(self, address: str) -> TokenSnapshot | None:
         log = _log.bind(address=_redact(address))
         retrying = AsyncRetrying(
             retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
@@ -154,6 +200,35 @@ class PumpFunClient:
             log.warning("pumpfun.fetch_one.exhausted", error=str(exc))
             raise PumpFunUnavailableError(f"pumpfun unavailable for {_redact(address)}") from exc
         return None  # unreachable — AsyncRetrying always yields at least once
+
+    async def _log_call(
+        self,
+        *,
+        endpoint: str,
+        status_code: int,
+        latency_ms: int,
+        success: bool,
+        error: str | None,
+    ) -> None:
+        """Best-effort write to ``api_call_log``. A failure here is warned, not raised.
+
+        The data path must not depend on the observability path: if the DB
+        is unreachable we still want callers to receive whatever the API
+        returned (or the original API error).
+        """
+        assert self._sessionmaker is not None  # narrowed by self._log_calls
+        try:
+            async with self._sessionmaker() as session, session.begin():
+                await ApiCallLogRepository(session).record(
+                    source=self.name,
+                    endpoint=endpoint,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    success=success,
+                    error=error,
+                )
+        except Exception as exc:
+            _log.warning("pumpfun.log_call.failed", error=str(exc))
 
     async def _fetch_one_inner(
         self,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+from types import TracebackType
+from typing import Self
 
 from pumpwatch.sources.base import TokenSnapshot
 from pumpwatch.sources.exceptions import PumpFunUnavailableError
@@ -70,6 +72,17 @@ class FakePriceDataSource:
 
     async def close(self) -> None:
         return None
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.close()
 
 
 def make_fake_source(

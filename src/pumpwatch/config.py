@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     PRIORITY_TICK_MEDIUM_SECONDS: int = 15
     PRIORITY_TICK_LOW_SECONDS: int = 60
 
+    # Scheduler (Celery Beat) cadence: how often the batch is rebuilt and dispatched.
+    SCHEDULER_FETCH_INTERVAL_SECONDS: int = 30
+    # Kill-switch for the api_call_log write inside PumpFunClient. When the
+    # client is constructed without a sessionmaker, logging is silently off
+    # regardless of this setting.
+    PUMPFUN_LOG_CALLS: bool = True
+
     # Telegram rate limits
     TELEGRAM_PER_CHAT_MSG_PER_SEC: int = 1
     TELEGRAM_GLOBAL_MSG_PER_SEC: int = 25

@@ -5,9 +5,9 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 3
-**Last Session Completed:** Session 3 — Telegram Bot, Commands, User Onboarding
-**Next Session:** Session 4 — Scheduler & Batch Builder
+**Phase:** Post-Session 4
+**Last Session Completed:** Session 4 — Scheduler & Batch Builder
+**Next Session:** Session 5 — Worker Pool & Price Ingestion
 **Last Updated:** 2026-04-24
 
 ## Session Plan
@@ -18,7 +18,7 @@ It is updated at the end of every session.
 | 1  | Project Scaffold & Infrastructure               | ✅ done | Docker Compose, Postgres, Redis, package skeleton, tooling |
 | 2  | Data Layer & Pump.fun Client                    | ✅ done | 6 models, initial migration, 6 repos, PumpFunClient + Fake, full test suite |
 | 3  | Telegram Bot, Commands, User Onboarding         | ✅ done | PTB v22 long-polling bot, /start /help /add /list /stop /settings, lazy-init db/session, user-settings migration, 37 new tests |
-| 4  | Scheduler & Batch Builder                       | ⬜      | Priority tiers, batch construction, Celery Beat |
+| 4  | Scheduler & Batch Builder                       | ✅ done | Celery app + Beat, pure priority/batch modules, per-sub tier persistence, ApiCallLog wired into PumpFunClient, scheduler + worker compose services, 37 new tests |
 | 5  | Worker Pool & Price Ingestion                   | ⬜      | Celery workers, Redis hot cache, price.updated events |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ⬜      | Median+MAD detector, dedup, Telegram dispatch |
 | 7  | Hardening: Observability, Error Handling, Scale | ⬜      | Prometheus, Grafana, dead-letter queue, load test |
@@ -100,6 +100,25 @@ Session 3 modified:
 - `docker-compose.yml` (+ `bot` service)
 - `tests/conftest.py` — calls `_reset_for_tests()` to drop any cached session singleton
 
+Session 4:
+- `src/pumpwatch/celery_app.py` — Celery app + Beat schedule + queue declarations
+- `src/pumpwatch/scheduler/__init__.py`, `priority.py`, `batch.py`, `tasks.py`, `main.py`
+- `tests/celery_helpers.py` — `eager_celery` fixture
+- `tests/scheduler/__init__.py`, `conftest.py`, `test_priority.py`, `test_batch.py`, `test_tasks.py`
+- `tests/integration/test_scheduler_real_redis.py` — gated real-broker smoke test
+
+Session 4 modified:
+- `pyproject.toml` (+celery>=5.3,<6; +redis>=5.0; +mypy override for celery/kombu)
+- `uv.lock` regenerated
+- `src/pumpwatch/config.py` (+`SCHEDULER_FETCH_INTERVAL_SECONDS`, `PUMPFUN_LOG_CALLS`)
+- `.env.example` (+2 new settings)
+- `src/pumpwatch/sources/pumpfun.py` — `PumpFunClient.__init__` now accepts `sessionmaker` + `log_calls`; new `_log_call` helper writes one `api_call_log` row per logical call
+- `src/pumpwatch/sources/fake.py` — `FakePriceDataSource` gained `__aenter__`/`__aexit__` so it's interchangeable with the real client in `async with`
+- `src/pumpwatch/db/repos/subscription.py` — new `SubscriptionTokenRow` DTO + `list_active_with_tokens` + bulk `set_priorities`
+- `src/pumpwatch/db/repos/price_snapshot.py` — new `recent_per_token(addresses, limit, window)`
+- `docker-compose.yml` (+`scheduler`, +`worker` services)
+- `tests/sources/test_pumpfun_client.py` (+5 logging-wired tests)
+
 ## Risks Realized (Session 2)
 
 - **Pump.fun API is Cloudflare-blocked (HTTP 530) as of 2026-04-23.** Both live smoke-test addresses returned a Cloudflare "Origin Down" interstitial. The client's retry + `PumpFunUnavailableError` path is exercised correctly; mocked unit tests prove the happy path. `PriceDataSource` is the abstraction seam — Session 5 will either bypass the block (browser-like UA, session cookie) or swap to DexScreener. See `tasks/lessons.md` for the full note.
@@ -130,6 +149,16 @@ These were decided during design and should not be revisited without an ADR:
 10. **Alert cooldown is not a user setting.** Dedup/cooldown is owned by the
     Session 6 alert engine via Redis TTLs; no `default_cooldown_minutes`
     column exists on `User` by design.
+11. **Beat-driven `fetch_batch` is the single scheduling moving part.** A
+    long-running asyncio scheduler loop alongside Beat was rejected as an
+    unnecessary second moving part at current scale. Beat fires one task,
+    the task rebuilds the batch and dispatches.
+12. **Priority lives on `Subscription.priority`, not `Token`.** The schema
+    already had a `Priority` enum and a per-subscription priority column.
+    Session 4 reuses both: each sub gets a tier computed from its own
+    thresholds; the batch builder picks `max(priority)` across subs per
+    token to drive dispatch routing. A token-level `priority_tier` column
+    was considered and rejected to avoid duplicating state.
 
 ## Known Risks / Watch Items
 

@@ -3,44 +3,46 @@
 This file is session-scoped. It is reset at the end of every session with
 the next session's name and any carry-over items.
 
-## Active: Session 4 — Scheduler & Batch Builder
+## Active: Session 5 — Worker Pool & Price Ingestion
 
-See the Session 4 prompt (provided by the user at session start) for full
-scoped steps.
+### Carry-over notes from Session 4
 
-### Carry-over notes from Session 3
+- `fetch_token` is a thin shell this session. Session 5 must:
+  - Persist every returned `TokenSnapshot` as a `PriceSnapshot` row.
+  - Push a "latest" snapshot to a Redis hot cache (key scheme TBD).
+  - Publish a `price.updated` pub-sub event for the Session 6 alert engine
+    to consume.
+- DexScreener fallback for Pump.fun's CF block is still unbuilt. Session 5
+  should decide between (a) browser-like UA / cookie plumbing and (b)
+  adding a `DexScreenerClient : PriceDataSource` implementation.
+- The `fetch_token` task currently logs per logical call via the wired-in
+  `ApiCallLogRepository`. Session 5's expanded body should re-use the same
+  sessionmaker hand-off for its snapshot writes (don't spin up a second
+  engine).
+- Subscription priority is now computed and persisted per-tick by the
+  scheduler. Session 5 workers can trust `Subscription.priority` as the
+  source of truth for tier when they need it.
+- Queue routing (`default`, `high`, `medium`, `low`) is wired in the
+  worker compose service via `-Q default,high,medium,low`. Session 7
+  should split into separate worker pools if tier isolation becomes
+  desirable.
+- Celery result backend uses Redis with a 1-hour TTL. If Session 5 starts
+  storing larger result payloads, revisit `result_expires` or switch to a
+  smaller ad-hoc payload.
 
-- `ApiCallLogRepository` is still not wired into `PumpFunClient`. Session 4
-  must pass an `async_sessionmaker` into the client (or a session factory
-  callback) so the scheduler/worker can record every external call.
-- The bot uses a **lazy-init** `get_engine()` / `get_sessionmaker()` in
-  `src/pumpwatch/db/session.py`. Scheduler/worker/alerts services should use
-  the same helpers — do not reintroduce an eager module-level engine.
-- `User` now carries `chat_id`, `alerts_muted`, `default_growth_pct`,
-  `default_stoploss_pct`. Alert dispatch (Session 6) reads `chat_id` for
-  delivery and must skip users with `alerts_muted=True`.
-- `Subscription.status` is a `StrEnum` (`ACTIVE` / `STOPPED` / `ARCHIVED`) —
-  the scheduler must filter to `ACTIVE` when computing the poll set.
-- The bot uses **long-polling**; the scheduler is independent of the bot
-  process. Both can run concurrently without coordination because Postgres
-  is the shared source of truth.
-- `/settings` does not yet support per-subscription editing (only global
-  defaults). Deferred to a future session; left here so it isn't forgotten.
-- `ConversationHandler` state is in-process. If/when the bot goes
-  multi-instance, add Redis-backed `PicklePersistence` (or equivalent) —
-  `user_data` contents must be picklable if we do.
-- Compose `bot` service overrides `DATABASE_URL` / `REDIS_URL` via
-  `environment:` because the root `.env` uses `localhost` for local dev.
-  Session 4's scheduler/worker services should do the same, or Session 7
-  should unify the env story.
-- PTB v22.7 resolved against our `>=21` spec. If v23 ever breaks handlers,
-  pin `>=21,<23` in `pyproject.toml`.
+### Session 6 carry-over
 
-### Future (not Session 4 scope)
+- Alert engine reads `User.alerts_muted` and `quiet_hours_*` before
+  dispatch. Polling continues even for muted users (so data is hot when
+  they unmute); skipping happens at dispatch time.
+- Median+MAD volume-spike detection is Session 6's job, not the
+  scheduler's. The priority module docstring notes this explicitly.
 
+### Future cleanup (not Session 5 scope)
+
+- Remove empty `src/pumpwatch/services/{bot,scheduler,worker,alerts}/`
+  placeholders. Session 1 created them; Sessions 3–4 superseded them.
 - Per-subscription editing in `/settings` (inline keyboards per token).
 - Redis-backed `ConversationHandler` persistence when multi-instance.
-- Remove the stale `src/pumpwatch/services/bot/` placeholder (Session 1
-  left an empty `__init__.py` that is now superseded by `src/pumpwatch/bot/`).
-- Unify the `tests/bot/conftest.py` and `tests/integration/test_bot_flow.py`
-  truncate fixtures.
+- Unify the `tests/bot/conftest.py`, `tests/integration/test_bot_flow.py`,
+  and new `tests/scheduler/conftest.py` truncate fixtures.

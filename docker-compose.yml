@@ -67,6 +67,51 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
+  # Single-instance by design: Beat must not run multiple replicas, otherwise
+  # fetch_batch fires twice per tick. Compose does not enforce this without
+  # Swarm; document and respect.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A pumpwatch.celery_app beat --loglevel=INFO
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
+  # Horizontally scalable: Session 7 will manage replica counts and
+  # per-tier worker pools.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
+      REDIS_URL: redis://redis:6379/0
+    command: >
+      celery -A pumpwatch.celery_app worker
+      --loglevel=INFO -Q default,high,medium,low --concurrency=4
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
 volumes:
   pumpwatch_pg_data:
   pumpwatch_redis_data:

@@ -4,7 +4,7 @@ A production-grade, multi-user Telegram bot for monitoring Solana memecoin
 tokens via the Pump.fun API. Delivers real-time price threshold alerts and
 statistical volume-spike detection to users on their personal watchlists.
 
-> **Status:** Early development (Session 3 complete — Telegram bot online).
+> **Status:** Early development (Session 4 complete — scheduler + Celery workers online).
 
 ## Architecture (Planned)
 
@@ -56,6 +56,26 @@ Once `bot` is running with a real `TELEGRAM_BOT_TOKEN`:
 PumpWatch is read-only: no private keys, no trade execution, no financial
 advice.
 
+## Scheduler & Workers
+
+The scheduler is a single-instance Celery Beat process that rebuilds the
+poll set every `SCHEDULER_FETCH_INTERVAL_SECONDS` (default 30s). For each
+active subscription it computes a priority tier (HIGH/MEDIUM/LOW) from the
+distance to either growth/stoploss threshold, recent volatility, and
+recent volume. One `fetch_token` task per unique token is dispatched, and
+the worker pool runs them.
+
+```bash
+docker compose up -d postgres redis scheduler worker
+# Smoke check — should return "pong"
+docker compose exec worker celery -A pumpwatch.celery_app inspect ping
+```
+
+The `scheduler` service is deliberately single-instance; running two Beat
+processes would fire `fetch_batch` twice per tick. The `worker` service is
+horizontally scalable — queue routing (`default`, `high`, `medium`, `low`)
+is in place but replica counts are a Session 7 concern.
+
 ## Development
 
 Install dependencies locally (requires [uv](https://docs.astral.sh/uv/)):
@@ -100,10 +120,9 @@ pumpwatch/
 │       │   └── repos/            # per-table repository classes
 │       ├── sources/              # PriceDataSource protocol + PumpFunClient
 │       ├── bot/                  # Telegram bot: handlers, validators, app factory
-│       └── services/
-│           ├── scheduler/        # fetch scheduling service (Session 4)
-│           ├── worker/           # Celery worker service (Session 5)
-│           └── alerts/           # alert engine service (Session 6)
+│       ├── celery_app.py         # Celery application + Beat schedule
+│       ├── scheduler/            # Celery tasks: batch builder, priority tiers
+│       └── services/             # (Session 1 placeholders; real code lives above)
 └── tests/
     ├── conftest.py
     └── test_smoke.py

@@ -8,8 +8,11 @@ from decimal import Decimal
 import aiohttp
 import pytest
 from aioresponses import aioresponses
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pumpwatch.config import Settings, get_settings
+from pumpwatch.db.models import ApiCallLog
 from pumpwatch.sources.exceptions import PumpFunUnavailableError
 from pumpwatch.sources.pumpfun import PumpFunClient, _parse_snapshot
 
@@ -170,3 +173,125 @@ async def test_fetch_batch_skips_failures() -> None:
         async with client:
             results = await client.fetch_batch(["ok", "miss", "boom"])
     assert set(results.keys()) == {"ok"}
+
+
+# ---- api_call_log wiring (Session 4) ---------------------------------
+
+
+async def _truncate_call_log(test_engine: AsyncEngine) -> None:
+    async with test_engine.begin() as conn:
+        await conn.execute(text("TRUNCATE api_call_log RESTART IDENTITY"))
+
+
+async def _read_call_logs(sm: async_sessionmaker[AsyncSession]) -> list[ApiCallLog]:
+    async with sm() as session:
+        result = await session.execute(select(ApiCallLog).order_by(ApiCallLog.id))
+        return list(result.scalars().all())
+
+
+async def test_logs_one_row_on_success(test_engine: AsyncEngine) -> None:
+    await _truncate_call_log(test_engine)
+    sm = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+    client = PumpFunClient(sessionmaker=sm)
+    with aioresponses() as m:
+        m.get(
+            _coin_url("logme"),
+            status=200,
+            payload={"symbol": "L", "usd_market_cap": "1"},
+        )
+        async with client:
+            snap = await client.fetch_one("logme")
+    assert snap is not None
+
+    rows = await _read_call_logs(sm)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.source == "pumpfun"
+    assert row.success is True
+    assert row.status_code == 200
+    assert row.error is None
+    assert row.latency_ms is not None and row.latency_ms >= 0
+
+
+async def test_logs_one_row_on_failure(test_engine: AsyncEngine) -> None:
+    await _truncate_call_log(test_engine)
+    sm = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+    client = PumpFunClient(
+        _test_settings(PUMPFUN_MAX_RETRY_ATTEMPTS=2),
+        sessionmaker=sm,
+    )
+    with aioresponses() as m:
+        for _ in range(2):
+            m.get(_coin_url("dead"), status=503)
+        async with client:
+            with pytest.raises(PumpFunUnavailableError):
+                await client.fetch_one("dead")
+
+    rows = await _read_call_logs(sm)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.success is False
+    assert row.status_code == 0
+    assert row.error is not None and "pumpfun unavailable" in row.error
+
+
+async def test_log_failure_does_not_break_data_path(
+    test_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A logging exception is swallowed; the caller still gets the snapshot."""
+    sm = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+    client = PumpFunClient(sessionmaker=sm)
+
+    async def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated DB outage")
+
+    monkeypatch.setattr(client, "_log_call", _boom)
+
+    with aioresponses() as m:
+        m.get(
+            _coin_url("survive"),
+            status=200,
+            payload={"symbol": "S", "usd_market_cap": "1"},
+        )
+        async with client:
+            snap = await client.fetch_one("survive")
+    assert snap is not None
+    assert snap.symbol == "S"
+
+
+async def test_no_log_when_sessionmaker_omitted(test_engine: AsyncEngine) -> None:
+    """Existing call sites (sessionmaker=None) still work and write nothing."""
+    await _truncate_call_log(test_engine)
+    sm = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+
+    client = PumpFunClient()  # no sessionmaker
+    with aioresponses() as m:
+        m.get(
+            _coin_url("silent"),
+            status=200,
+            payload={"symbol": "S", "usd_market_cap": "1"},
+        )
+        async with client:
+            await client.fetch_one("silent")
+
+    rows = await _read_call_logs(sm)
+    assert rows == []
+
+
+async def test_log_calls_kill_switch_disables_writes(test_engine: AsyncEngine) -> None:
+    await _truncate_call_log(test_engine)
+    sm = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+
+    client = PumpFunClient(sessionmaker=sm, log_calls=False)
+    with aioresponses() as m:
+        m.get(
+            _coin_url("offlog"),
+            status=200,
+            payload={"symbol": "O", "usd_market_cap": "1"},
+        )
+        async with client:
+            await client.fetch_one("offlog")
+
+    rows = await _read_call_logs(sm)
+    assert rows == []

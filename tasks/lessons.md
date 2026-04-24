@@ -96,3 +96,33 @@ mistake or make a better choice.
 - **Lesson:** Strict mypy on `tests/` requires an override for `asyncpg` (no stubs / no `py.typed`).
   **Context:** The pre-existing `tests/conftest.py` imports `asyncpg` for the test-DB create/drop admin connection. `mypy --strict src tests` complained about missing stubs.
   **Action:** Added a `[[tool.mypy.overrides]]` stanza in `pyproject.toml` for `asyncpg` / `asyncpg.*`. Kept `files = ["src"]` default so local `mypy` invocations still work; the verification checklist explicitly passes `src tests`.
+
+## Session 4 — 2026-04-24
+
+- **Lesson:** Session 4's prompt named `growth_pct` / `stoploss_pct` / `Token.priority_tier`; the schema that Sessions 2–3 actually shipped uses `growth_threshold_pct` / `stoploss_threshold_pct` and a pre-existing `Subscription.priority` column + `Priority` enum.
+  **Context:** The pre-session checklist caught the mismatch before any code was written (same failure mode Session 3 hit). The prompt assumed Token-level tier state; the schema tracks it per-Subscription because each user has their own thresholds.
+  **Action:** Reused `Subscription.priority` and the existing repo methods (`list_by_priority`, `update_priority`) plus a new bulk `set_priorities`. Added a `SubscriptionTokenRow` DTO in `db/repos/subscription.py` rather than a new column on `Token`. When a session prompt and the actual schema disagree, the schema wins; flag it via AskUserQuestion rather than guessing. Recorded as Architectural Decision #12.
+
+- **Lesson:** `asyncio.run()` inside a Celery task body cannot be called from pytest-asyncio's active event loop.
+  **Context:** The Celery tasks wrap their async helpers with `asyncio.run(...)` because Celery's worker threads have no loop. In eager-mode tests, the task body runs synchronously on the pytest event-loop thread, so `asyncio.run` refuses to start a new loop.
+  **Action:** Test helpers `_run_batch` and `_run_fetch_token` wrap `fetch_batch.delay().get()` in `asyncio.to_thread(...)`. Same pattern `tests/conftest.py` uses for Alembic. Production code is unchanged — the `asyncio.run` wrapper is the right shape for real Celery workers.
+
+- **Lesson:** Eager-mode Celery ignores `apply_async(queue=...)`. Routing is a Kombu/broker concern that eager mode bypasses entirely.
+  **Context:** Wrote tests hoping to assert which queue a dispatched task would land on by inspecting Celery internals; that information doesn't survive eager mode.
+  **Action:** Tests monkey-patch `fetch_token.apply_async` to a recording stub and assert on the `queue` kwarg directly. Documented in `tests/celery_helpers.py`'s docstring so Session 5 doesn't repeat the attempt.
+
+- **Lesson:** SA columns typed `Mapped[StrEnum]` but backed by `String(16)` load as plain `str`, not the enum.
+  **Context:** `Subscription.priority: Mapped[Priority]` is stored as a `String(16)` column with a CHECK constraint (not a native Postgres enum). After SELECT the attribute is a `"low"` string, so `sub.priority is Priority.LOW` fails. `==` still works because `StrEnum` instances compare equal to their string value.
+  **Action:** Use `sub.priority == Priority.LOW` in assertions, not `is`. Noted in a comment next to the assertion for future readers.
+
+- **Lesson:** Sequential `server_default=func.now()` inserts in the same session can produce identical timestamps, making newest-vs-oldest ordering undefined in tests.
+  **Context:** `test_fetch_batch_uses_recent_snapshots_to_drive_priority` seeded two snapshots expecting one to be newer. When both rows got the same `now()`, the order in which `recent_per_token` returned them was arbitrary, and half the time the priority came out wrong.
+  **Action:** Tests set `ts=...` explicitly with a `timedelta(minutes=5)` gap. Server-default `func.now()` is fine for production writes where ordering doesn't need to be deterministic at sub-microsecond resolution.
+
+- **Lesson:** Defensive try/except for logging must live in the outer caller, not only inside `_log_call`.
+  **Context:** The test that injects a logging failure via `monkeypatch.setattr(client, "_log_call", _boom)` replaces the whole method — including its internal try/except — so the `RuntimeError` escaped and broke the data path.
+  **Action:** Wrapped the `await self._log_call(...)` site in `fetch_one`'s `finally` block with its own try/except. The data path now survives *any* implementation of `_log_call`, including monkey-patched ones.
+
+- **Lesson:** The `@celery.task(...)` decorator produces an untyped callable, triggering mypy's `untyped-decorator` rule in strict mode.
+  **Context:** The first `# type: ignore[misc]` I tried was the wrong code; mypy reports the *error code* in the message but strict mode will ignore a mismatched suppression and re-flag.
+  **Action:** Use `# type: ignore[untyped-decorator]` explicitly. Also added `kombu` to the existing `celery` mypy override since kombu ships no `py.typed` marker either.

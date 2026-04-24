@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 
@@ -11,6 +13,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pumpwatch.config import get_settings
 from pumpwatch.db.enums import Priority, SubscriptionStatus
 from pumpwatch.db.models import Subscription
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionTokenRow:
+    """Lightweight projection used by the scheduler to build poll batches.
+
+    Carries just the columns the priority computation needs, joined to the
+    parent token (the join itself is implicit — the FK guarantees the token
+    exists; we only filter to ``ACTIVE`` subs).
+    """
+
+    subscription_id: int
+    token_address: str
+    growth_threshold_pct: Decimal
+    stoploss_threshold_pct: Decimal
 
 
 class SubscriptionRepository:
@@ -87,6 +104,49 @@ class SubscriptionRepository:
             .values(priority=priority.value)
         )
         await self._session.execute(stmt)
+        await self._session.flush()
+
+    async def list_active_with_tokens(self) -> list[SubscriptionTokenRow]:
+        """Return one ``SubscriptionTokenRow`` per active subscription.
+
+        The scheduler calls this every Beat tick to rebuild the poll set.
+        Only the columns the priority computation needs are projected, so a
+        million-sub workload stays cheap.
+        """
+        stmt = (
+            select(
+                Subscription.id,
+                Subscription.token_address,
+                Subscription.growth_threshold_pct,
+                Subscription.stoploss_threshold_pct,
+            )
+            .where(Subscription.status == SubscriptionStatus.ACTIVE.value)
+            .order_by(Subscription.token_address, Subscription.id)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            SubscriptionTokenRow(
+                subscription_id=row.id,
+                token_address=row.token_address,
+                growth_threshold_pct=row.growth_threshold_pct,
+                stoploss_threshold_pct=row.stoploss_threshold_pct,
+            )
+            for row in result.all()
+        ]
+
+    async def set_priorities(self, assignments: Mapping[Priority, list[int]]) -> None:
+        """Bulk update ``priority`` for many subscriptions at once.
+
+        One UPDATE per non-empty tier (3 queries max). This is the persistence
+        path for the scheduler's per-tick tier recomputation.
+        """
+        for tier, sub_ids in assignments.items():
+            if not sub_ids:
+                continue
+            stmt = (
+                update(Subscription).where(Subscription.id.in_(sub_ids)).values(priority=tier.value)
+            )
+            await self._session.execute(stmt)
         await self._session.flush()
 
     async def stop(self, subscription_id: int) -> None:
