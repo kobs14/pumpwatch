@@ -4,7 +4,7 @@ A production-grade, multi-user Telegram bot for monitoring Solana memecoin
 tokens via the Pump.fun API. Delivers real-time price threshold alerts and
 statistical volume-spike detection to users on their personal watchlists.
 
-> **Status:** Early development (Session 1 complete — project scaffold).
+> **Status:** Early development (Session 3 complete — Telegram bot online).
 
 ## Architecture (Planned)
 
@@ -38,6 +38,23 @@ Five services orchestrated with Docker Compose:
    ```
 
    You should see a structured log line with `status=ready`.
+
+## Bot Usage
+
+Once `bot` is running with a real `TELEGRAM_BOT_TOKEN`:
+
+| Command | What it does |
+|---|---|
+| `/start` | Create-or-fetch your PumpWatch account (stores `chat_id`). |
+| `/help` | List commands and usage notes. |
+| `/add <mint> <growth%> <stoploss%>` | Watch a Solana mint with thresholds. Send `/add` alone for a guided flow. |
+| `/list` | Show your active subscriptions. |
+| `/stop <mint>` | Soft-deactivate a subscription (history kept). |
+| `/settings` | Inline keyboard for mute, timezone, default growth %, default stoploss %. |
+| `/cancel` | Abort an in-progress `/add` or `/settings` conversation. |
+
+PumpWatch is read-only: no private keys, no trade execution, no financial
+advice.
 
 ## Development
 
@@ -78,12 +95,15 @@ pumpwatch/
 │       ├── main.py               # application entrypoint
 │       ├── db/
 │       │   ├── base.py           # SQLAlchemy DeclarativeBase
-│       │   └── session.py        # async engine and session factory
+│       │   ├── session.py        # lazy-init async engine + sessionmaker
+│       │   ├── models/           # ORM models (User, Token, Subscription, ...)
+│       │   └── repos/            # per-table repository classes
+│       ├── sources/              # PriceDataSource protocol + PumpFunClient
+│       ├── bot/                  # Telegram bot: handlers, validators, app factory
 │       └── services/
-│           ├── bot/              # Telegram bot service
-│           ├── scheduler/        # fetch scheduling service
-│           ├── worker/           # Celery worker service
-│           └── alerts/           # alert engine service
+│           ├── scheduler/        # fetch scheduling service (Session 4)
+│           ├── worker/           # Celery worker service (Session 5)
+│           └── alerts/           # alert engine service (Session 6)
 └── tests/
     ├── conftest.py
     └── test_smoke.py

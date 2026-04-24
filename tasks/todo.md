@@ -3,29 +3,44 @@
 This file is session-scoped. It is reset at the end of every session with
 the next session's name and any carry-over items.
 
-## Active: Session 3 — Telegram Bot, Commands, User Onboarding
+## Active: Session 4 — Scheduler & Batch Builder
 
-See the Session 3 prompt provided by the user for the full scoped steps.
+See the Session 4 prompt (provided by the user at session start) for full
+scoped steps.
 
-### Carry-over notes from Session 2
+### Carry-over notes from Session 3
 
-- Session 3 must add `python-telegram-bot[ext]>=21` to `pyproject.toml`
-  (then `uv lock --python 3.12 && uv sync --python 3.12`).
-- `TELEGRAM_BOT_TOKEN` is already declared in `Settings` and documented in
-  `.env.example`. The bot code should read it via `get_settings()`.
-- The `UserRepository.upsert_from_telegram` and
-  `SubscriptionRepository` methods are ready — wire `/add`, `/list`,
-  `/stop`, `/settings` through these repos. **Do not** add SQL in handlers.
-- `db/session.py` still creates its engine eagerly at module import. The
-  bot service should import it lazily (inside handler setup) so that a
-  missing env var in CI/test fails loudly in one clear place.
-- Pump.fun API is currently Cloudflare-blocked (HTTP 530). Session 3
-  doesn't touch the data source, but keep this in mind when writing any
-  end-to-end "paste an address and see a price" demo — use the fake source
-  for demos until Session 5 addresses the block.
-- `ApiCallLogRepository` exists but is not wired into `PumpFunClient` yet.
-  Not Session 3's problem — mentioned here for continuity.
-- Telegram rate limits (`TELEGRAM_PER_CHAT_MSG_PER_SEC`,
-  `TELEGRAM_GLOBAL_MSG_PER_SEC`) are already in `Settings`. The outbound
-  rate limiter lives in Session 6 (alert engine), not Session 3 — command
-  handlers reply inline and don't need a dedicated limiter.
+- `ApiCallLogRepository` is still not wired into `PumpFunClient`. Session 4
+  must pass an `async_sessionmaker` into the client (or a session factory
+  callback) so the scheduler/worker can record every external call.
+- The bot uses a **lazy-init** `get_engine()` / `get_sessionmaker()` in
+  `src/pumpwatch/db/session.py`. Scheduler/worker/alerts services should use
+  the same helpers — do not reintroduce an eager module-level engine.
+- `User` now carries `chat_id`, `alerts_muted`, `default_growth_pct`,
+  `default_stoploss_pct`. Alert dispatch (Session 6) reads `chat_id` for
+  delivery and must skip users with `alerts_muted=True`.
+- `Subscription.status` is a `StrEnum` (`ACTIVE` / `STOPPED` / `ARCHIVED`) —
+  the scheduler must filter to `ACTIVE` when computing the poll set.
+- The bot uses **long-polling**; the scheduler is independent of the bot
+  process. Both can run concurrently without coordination because Postgres
+  is the shared source of truth.
+- `/settings` does not yet support per-subscription editing (only global
+  defaults). Deferred to a future session; left here so it isn't forgotten.
+- `ConversationHandler` state is in-process. If/when the bot goes
+  multi-instance, add Redis-backed `PicklePersistence` (or equivalent) —
+  `user_data` contents must be picklable if we do.
+- Compose `bot` service overrides `DATABASE_URL` / `REDIS_URL` via
+  `environment:` because the root `.env` uses `localhost` for local dev.
+  Session 4's scheduler/worker services should do the same, or Session 7
+  should unify the env story.
+- PTB v22.7 resolved against our `>=21` spec. If v23 ever breaks handlers,
+  pin `>=21,<23` in `pyproject.toml`.
+
+### Future (not Session 4 scope)
+
+- Per-subscription editing in `/settings` (inline keyboards per token).
+- Redis-backed `ConversationHandler` persistence when multi-instance.
+- Remove the stale `src/pumpwatch/services/bot/` placeholder (Session 1
+  left an empty `__init__.py` that is now superseded by `src/pumpwatch/bot/`).
+- Unify the `tests/bot/conftest.py` and `tests/integration/test_bot_flow.py`
+  truncate fixtures.

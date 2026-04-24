@@ -5,10 +5,10 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 2
-**Last Session Completed:** Session 2 — Data Layer & Pump.fun Client
-**Next Session:** Session 3 — Telegram Bot, Commands, User Onboarding
-**Last Updated:** 2026-04-23
+**Phase:** Post-Session 3
+**Last Session Completed:** Session 3 — Telegram Bot, Commands, User Onboarding
+**Next Session:** Session 4 — Scheduler & Batch Builder
+**Last Updated:** 2026-04-24
 
 ## Session Plan
 
@@ -17,7 +17,7 @@ It is updated at the end of every session.
 | 0  | Bootstrap docs (CLAUDE.md, this file, etc.)     | ✅ done | Created by user before any code session |
 | 1  | Project Scaffold & Infrastructure               | ✅ done | Docker Compose, Postgres, Redis, package skeleton, tooling |
 | 2  | Data Layer & Pump.fun Client                    | ✅ done | 6 models, initial migration, 6 repos, PumpFunClient + Fake, full test suite |
-| 3  | Telegram Bot, Commands, User Onboarding         | ⬜ next | python-telegram-bot, /add /list /stop /settings /help |
+| 3  | Telegram Bot, Commands, User Onboarding         | ✅ done | PTB v22 long-polling bot, /start /help /add /list /stop /settings, lazy-init db/session, user-settings migration, 37 new tests |
 | 4  | Scheduler & Batch Builder                       | ⬜      | Priority tiers, batch construction, Celery Beat |
 | 5  | Worker Pool & Price Ingestion                   | ⬜      | Celery workers, Redis hot cache, price.updated events |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ⬜      | Median+MAD detector, dedup, Telegram dispatch |
@@ -71,6 +71,17 @@ Session 2:
 - `tests/sources/__init__.py`, `tests/sources/test_fake.py`, `tests/sources/test_pumpfun_client.py` — 19 source tests (fake + aioresponses-mocked client)
 - `tests/integration/__init__.py`, `tests/integration/test_fake_source_to_db.py` — end-to-end contract test
 
+Session 3:
+- `alembic/versions/5050d79ff7ea_add_user_bot_settings.py` — adds `chat_id` (with backfill), `alerts_muted`, `default_growth_pct`, `default_stoploss_pct` to `users`
+- `src/pumpwatch/bot/__init__.py`, `src/pumpwatch/bot/app.py`, `src/pumpwatch/bot/main.py`, `src/pumpwatch/bot/deps.py` — Application factory, entry point, bot_data sessionmaker helper
+- `src/pumpwatch/bot/validators.py` — `is_valid_solana_mint` (base58, length 32–44)
+- `src/pumpwatch/bot/formatting.py` — MarkdownV2 escape + subscription-row renderer
+- `src/pumpwatch/bot/keyboards.py` — `/settings` inline keyboard + callback constants
+- `src/pumpwatch/bot/handlers/{__init__,start,add,list_cmd,stop,settings,errors}.py` — all six command handlers plus the global error handler
+- `tests/bot/__init__.py`, `tests/bot/conftest.py`, `tests/bot/harness.py` — fake Update/Context stubs and a sessionmaker fixture that truncates between tests
+- `tests/bot/test_{validators,handlers_start,handlers_add,handlers_settings}.py` — 29 handler unit tests
+- `tests/integration/test_bot_flow.py` — end-to-end `/start → /add → /list → /stop → /list` flow
+
 Modified:
 - `pyproject.toml` (+aiohttp, tenacity, aiolimiter, python-dateutil, aioresponses, types-python-dateutil)
 - `uv.lock` regenerated
@@ -78,6 +89,16 @@ Modified:
 - `.env.example` (+5 new documented settings)
 - `alembic/env.py` (imports `pumpwatch.db.models` for metadata registration)
 - `tests/conftest.py` (rewritten with real test DB fixtures and SAVEPOINT rollback)
+
+Session 3 modified:
+- `pyproject.toml` (+python-telegram-bot[job-queue]>=21; +asyncpg mypy override)
+- `uv.lock` regenerated
+- `src/pumpwatch/db/session.py` — lazy-init `get_engine`/`get_sessionmaker`/`dispose_engine` (replaces eager module-level engine)
+- `src/pumpwatch/db/models/user.py` — adds `chat_id`, `alerts_muted`, `default_growth_pct`, `default_stoploss_pct`
+- `src/pumpwatch/db/repos/user.py` — `upsert_from_telegram` accepts optional `chat_id`
+- `src/pumpwatch/db/repos/subscription.py` — `create_or_update`, `stop_by_user_and_token`, `get_by_user_and_token`
+- `docker-compose.yml` (+ `bot` service)
+- `tests/conftest.py` — calls `_reset_for_tests()` to drop any cached session singleton
 
 ## Risks Realized (Session 2)
 
@@ -100,6 +121,15 @@ These were decided during design and should not be revisited without an ADR:
    threshold, recent volatility, and recent volume.
 7. **Telegram has its own outbound rate limiter** (per-chat token bucket)
    independent of the Pump.fun rate limiter.
+8. **Bot uses long-polling, not webhook.** Webhook deployment is a Session 8
+   concern. `ConversationHandler` state is in-memory per-process, which is why
+   the bot is a single-instance service; Redis-backed persistence is deferred.
+9. **`/add` validates mint format only.** On-chain existence and metadata
+   (`symbol`, `name`) are hydrated by the data-source layer when the
+   scheduler polls — the bot never talks to Pump.fun directly.
+10. **Alert cooldown is not a user setting.** Dedup/cooldown is owned by the
+    Session 6 alert engine via Redis TTLs; no `default_cooldown_minutes`
+    column exists on `User` by design.
 
 ## Known Risks / Watch Items
 

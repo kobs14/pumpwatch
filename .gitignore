@@ -39,3 +39,6 @@ docker-compose.override.yml
 
 # Ruff
 .ruff_cache/
+
+# Personal notes (not committed)
+NOTES.md

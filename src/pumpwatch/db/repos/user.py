@@ -28,14 +28,18 @@ class UserRepository:
         telegram_id: int,
         username: str | None,
         language_code: str | None,
+        chat_id: int | None = None,
     ) -> User:
         """Insert-or-update a user keyed by Telegram ID.
 
-        Username/language may change on every update from Telegram so we refresh
-        them. Returns the persisted ``User`` row.
+        Username/language/chat_id may change on update and are refreshed on
+        conflict. For private chats ``chat_id == telegram_id``; if ``chat_id``
+        is not supplied, the Telegram ID is used as a safe default.
         """
+        effective_chat_id = chat_id if chat_id is not None else telegram_id
         values: dict[str, Any] = {
             "telegram_id": telegram_id,
+            "chat_id": effective_chat_id,
             "telegram_username": username,
         }
         if language_code is not None:

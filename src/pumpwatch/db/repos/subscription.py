@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pumpwatch.config import get_settings
@@ -97,3 +98,67 @@ class SubscriptionRepository:
         )
         await self._session.execute(stmt)
         await self._session.flush()
+
+    async def get_by_user_and_token(
+        self,
+        user_id: int,
+        token_address: str,
+    ) -> Subscription | None:
+        """Return the subscription row for ``(user_id, token_address)`` or ``None``."""
+        stmt = (
+            select(Subscription)
+            .where(Subscription.user_id == user_id)
+            .where(Subscription.token_address == token_address)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def create_or_update(
+        self,
+        user_id: int,
+        token_address: str,
+        growth_pct: Decimal,
+        stoploss_pct: Decimal,
+    ) -> Subscription:
+        """Upsert a subscription's thresholds; reactivate if previously stopped.
+
+        The ``(user_id, token_address)`` pair has a unique constraint, so this
+        is the bot's ``/add`` commit path: new token → insert, already-watched
+        token → refresh thresholds and flip status back to ``ACTIVE`` if the
+        user had previously stopped it. Returns the persisted row.
+        """
+        existing = await self.get_by_user_and_token(user_id, token_address)
+        if existing is None:
+            return await self.create(
+                user_id=user_id,
+                token_address=token_address,
+                growth_pct=growth_pct,
+                stoploss_pct=stoploss_pct,
+            )
+
+        existing.growth_threshold_pct = growth_pct
+        existing.stoploss_threshold_pct = stoploss_pct
+        existing.status = SubscriptionStatus.ACTIVE
+        await self._session.flush()
+        return existing
+
+    async def stop_by_user_and_token(
+        self,
+        user_id: int,
+        token_address: str,
+    ) -> bool:
+        """Soft-deactivate the user's subscription to ``token_address``.
+
+        Returns ``True`` if a row was flipped to ``STOPPED``, ``False`` if no
+        matching active/paused subscription existed (caller can use this to
+        decide between a "stopped" reply and a "not watching" reply).
+        """
+        stmt = (
+            update(Subscription)
+            .where(Subscription.user_id == user_id)
+            .where(Subscription.token_address == token_address)
+            .where(Subscription.status != SubscriptionStatus.STOPPED.value)
+            .values(status=SubscriptionStatus.STOPPED.value)
+        )
+        result = cast(CursorResult[None], await self._session.execute(stmt))
+        await self._session.flush()
+        return (result.rowcount or 0) > 0

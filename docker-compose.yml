@@ -47,6 +47,26 @@ services:
       timeout: 5s
       retries: 3
 
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Override the localhost-style URLs from .env with compose service names.
+      DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
+      REDIS_URL: redis://redis:6379/0
+    command: python -m pumpwatch.bot.main
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
 volumes:
   pumpwatch_pg_data:
   pumpwatch_redis_data:

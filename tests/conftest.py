@@ -1,10 +1,10 @@
 """Shared test fixtures.
 
-Critical ordering note: these ``os.environ.setdefault`` calls MUST run before
-any ``pumpwatch.*`` import, because ``pumpwatch.db.session`` creates its
-engine eagerly at import time against whatever ``DATABASE_URL`` is live. The
-test suite uses its own ``pumpwatch_test`` database and its own engine, but
-pumpwatch still needs valid env vars to import.
+The ``os.environ.setdefault`` calls still run before any ``pumpwatch.*`` import
+so pydantic-settings has the values it needs when ``Settings()`` is first
+constructed. As of Session 3, ``pumpwatch.db.session`` is lazy-init — tests
+use their own ``NullPool`` engine (see ``test_engine``) and never touch the
+module-level singletons.
 """
 
 from __future__ import annotations
@@ -32,9 +32,12 @@ from sqlalchemy.pool import NullPool
 
 from alembic import command
 from pumpwatch.config import get_settings
+from pumpwatch.db.session import _reset_for_tests
 
-# Clear any cached Settings() captured before env vars were set above.
+# Clear any cached Settings() captured before env vars were set above, and
+# drop any db-session singleton a previous test process may have cached.
 get_settings.cache_clear()
+_reset_for_tests()
 
 
 def _admin_dsn(test_url: str) -> tuple[str, str]:
