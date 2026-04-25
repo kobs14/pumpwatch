@@ -4,7 +4,7 @@ A production-grade, multi-user Telegram bot for monitoring Solana memecoin
 tokens via the Pump.fun API. Delivers real-time price threshold alerts and
 statistical volume-spike detection to users on their personal watchlists.
 
-> **Status:** Early development (Session 5 complete — worker price ingestion and `pw:price.updated` events online).
+> **Status:** Early development (Session 6 complete — alert engine subscribes to `pw:price.updated`, runs threshold + median+MAD detectors, dedupes, suppresses, persists, and dispatches via Telegram).
 
 ## Architecture (Planned)
 
@@ -91,9 +91,55 @@ Each `fetch_token` task performs three ordered steps:
    pw:price.updated <json>`. A Redis outage warns but does not break the
    snapshot write.
 
-The Redis namespace is `pw:*` throughout. Session 6's alert engine will
-subscribe to `pw:price.updated` and use a separate `pw:alert:*` prefix
-for dedup TTLs.
+The Redis namespace is `pw:*` throughout. The alert engine subscribes to
+`pw:price.updated` and uses a separate `pw:alert:*` prefix for dedup
+TTL keys.
+
+## Alert engine (Session 6)
+
+The `alerts` service is a single-instance long-running consumer. It
+subscribes to `pw:price.updated` once at startup, then for each event:
+
+1. **Detect** — for every active subscription on the event's token:
+   - **Threshold detector** (pure): compares the event's `market_cap_usd`
+     against `Subscription.baseline_market_cap` and fires `GROWTH_HIT`,
+     `GROWTH_WARNING`, `STOPLOSS_HIT`, or `STOPLOSS_WARNING` per the
+     sub's `growth_threshold_pct`, `stoploss_threshold_pct`, and
+     `warning_buffer_pct`. Inclusive on the HIT side.
+   - **Median + MAD volume-spike detector** (pure): pulls the last
+     `VOLUME_SPIKE_WINDOW_SECONDS` of `volume_5m_usd` history (excluding
+     the current bar), requires `VOLUME_SPIKE_MIN_SAMPLES`, and fires
+     `VOLUME_SPIKE` if `(current - median) / mad >= sub.volume_spike_k`.
+2. **Dedupe** — Redis-TTL key `pw:alert:<user>:<token>:<type>`. TTL
+   varies per alert type (`*_HIT` = 1h, `*_WARNING` = 5m, spike = 10m).
+   On Redis failure, falls back to the DB-side
+   `AlertRepository.recent_for_subscription` backstop.
+3. **Suppress** — `User.alerts_muted`, `Subscription.priority == PAUSED`,
+   or quiet-hours window in the user's timezone (zoneinfo, wrap-around
+   and DST handled). Suppressed alerts are still persisted (audit
+   trail) with `delivered=False` and `delivery_error="suppressed: ..."`,
+   and the dedup key is still set so unmute does not replay a backlog.
+4. **Persist** — write the row to `alerts_sent` *before* dispatching.
+   CLAUDE.md invariant.
+5. **Dispatch** — `telegram.Bot.send_message` via the alerts-service-
+   owned Bot client (separate process from the bot service, same
+   token, no `getUpdates` conflict). Per-chat + global `aiolimiter`
+   rate limits. One inline retry on `TelegramError`; second failure
+   marks `delivery_error` on the already-persisted row and the loop
+   keeps consuming.
+
+```bash
+docker compose up -d postgres redis bot scheduler worker alerts
+docker compose logs -f alerts
+
+# Watch dedup keys land
+docker compose exec redis redis-cli --scan --pattern 'pw:alert:*'
+
+# See recent alert rows
+docker compose exec postgres psql -U pumpwatch -d pumpwatch -c \
+  "SELECT id, subscription_id, alert_type, delivered, delivery_error, created_at \
+   FROM alerts_sent ORDER BY id DESC LIMIT 10;"
+```
 
 ## Development
 
@@ -142,6 +188,7 @@ pumpwatch/
 │       ├── bot/                  # Telegram bot: handlers, validators, app factory
 │       ├── celery_app.py         # Celery application + Beat schedule
 │       ├── scheduler/            # Celery tasks: batch builder, priority tiers, fetch_token
+│       ├── alerts/               # subscriber loop, detectors, dedup, suppression, dispatcher
 │       └── services/             # (Session 1 placeholders; real code lives above)
 └── tests/
     ├── conftest.py

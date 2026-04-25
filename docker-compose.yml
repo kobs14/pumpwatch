@@ -112,6 +112,28 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
+  # Single-instance long-running consumer of pw:price.updated. Pub-sub has
+  # zero replay, so during a restart events are lost for the restart
+  # window — Postgres snapshot rows remain authoritative.
+  alerts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
+      REDIS_URL: redis://redis:6379/0
+    command: python -m pumpwatch.alerts.main
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
 volumes:
   pumpwatch_pg_data:
   pumpwatch_redis_data:

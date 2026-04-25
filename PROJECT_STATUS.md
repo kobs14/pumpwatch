@@ -5,10 +5,10 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 5
-**Last Session Completed:** Session 5 — Worker Pool & Price Ingestion
-**Next Session:** Session 6 — Alert Engine: Thresholds + Volume Spike
-**Last Updated:** 2026-04-24
+**Phase:** Post-Session 6
+**Last Session Completed:** Session 6 — Alert Engine: Thresholds + Volume Spike
+**Next Session:** Session 7 — Hardening: Observability, Error Handling, Scale
+**Last Updated:** 2026-04-25
 
 ## Session Plan
 
@@ -20,7 +20,7 @@ It is updated at the end of every session.
 | 3  | Telegram Bot, Commands, User Onboarding         | ✅ done | PTB v22 long-polling bot, /start /help /add /list /stop /settings, lazy-init db/session, user-settings migration, 37 new tests |
 | 4  | Scheduler & Batch Builder                       | ✅ done | Celery app + Beat, pure priority/batch modules, per-sub tier persistence, ApiCallLog wired into PumpFunClient, scheduler + worker compose services, 37 new tests |
 | 5  | Worker Pool & Price Ingestion                   | ✅ done | fetch_token writes PriceSnapshot + pw:price:<addr> hot cache (tier-varying TTL) + pw:price.updated pub-sub; PRICE_SOURCE setting + factory; silent-skip on PumpFunUnavailableError; best-effort cache/pub-sub; fakeredis unit + real-Redis integration tests (39 new) |
-| 6  | Alert Engine: Thresholds + Volume Spike         | ⬜      | Median+MAD detector, dedup, Telegram dispatch |
+| 6  | Alert Engine: Thresholds + Volume Spike         | ✅ done | `alerts` service: subscribe to `pw:price.updated`, threshold + median+MAD detectors, Redis-TTL dedup under `pw:alert:*`, suppression (mute/PAUSED/quiet-hours w/ tz + DST), persist-then-dispatch via standalone `telegram.Bot`, 47 new tests |
 | 7  | Hardening: Observability, Error Handling, Scale | ⬜      | Prometheus, Grafana, dead-letter queue, load test |
 | 8  | Documentation, README, Deployment Guide         | ⬜      | Architecture diagrams, ADRs, deploy guide |
 
@@ -114,6 +114,17 @@ Session 5:
 - `tests/sources/test_factory.py` — source factory tests
 - `tests/integration/test_worker_price_ingestion_real_redis.py` — gated real-Redis end-to-end
 
+Session 6:
+- `src/pumpwatch/alerts/__init__.py`, `detectors.py`, `dedup.py`, `suppression.py`, `dispatcher.py`, `subscriber.py`, `main.py` — pure detectors (threshold + median+MAD), Redis-TTL dedup, mute/PAUSED/quiet-hours suppression (zoneinfo, wrap-around, DST), standalone `telegram.Bot` dispatcher with per-chat + global aiolimiters and one inline retry, pub-sub subscriber loop, sync entry point with SIGTERM/SIGINT handling
+- `tests/alerts/__init__.py`, `tests/alerts/conftest.py`, `test_detectors.py`, `test_suppression.py`, `test_dedup.py`, `test_dispatcher.py`, `test_subscriber.py` — 47 tests: pure detector edge cases, suppression incl. DST forward + Asia/Tokyo + bogus tz fallback, fakeredis-backed dedup, AsyncMock-backed dispatcher (retry + final raise), full per-event flow with seeded DB rows
+- `tests/integration/test_alerts_real_redis.py` — gated end-to-end (subscribe → publish → drain → persist → dispatch) against a real Redis
+
+Session 6 modified:
+- `src/pumpwatch/cache/redis_client.py` (+`ALERT_DEDUP_PREFIX`, +`alert_dedup_key(...)`; docstring lists alert namespace under the existing cache role)
+- `src/pumpwatch/config.py` (+6 settings: `VOLUME_SPIKE_WINDOW_SECONDS`, `VOLUME_SPIKE_MIN_SAMPLES`, `ALERT_DEDUP_HIT_SECONDS`, `ALERT_DEDUP_WARNING_SECONDS`, `ALERT_DEDUP_SPIKE_SECONDS`, `ALERT_DISPATCH_RETRY_DELAY_SECONDS`)
+- `.env.example` (+6 documented settings)
+- `docker-compose.yml` (+`alerts` service: single replica, `restart: unless-stopped`, env-overridden `DATABASE_URL`/`REDIS_URL`)
+
 Session 4 modified:
 - `pyproject.toml` (+celery>=5.3,<6; +redis>=5.0; +mypy override for celery/kombu)
 - `uv.lock` regenerated
@@ -184,6 +195,24 @@ These were decided during design and should not be revisited without an ADR:
     derive the cache TTL and the event `tier` field. User-mute,
     quiet-hours, and `PAUSED` suppression all live at alert-dispatch
     time in Session 6 — not in the worker.
+16. **Telegram dispatch shape: standalone `telegram.Bot` in the alerts
+    service.** The bot service still owns `getUpdates` (long-polling);
+    the alerts service holds its own `telegram.Bot` instance against
+    the same token and only sends. Two processes sharing the token is
+    safe because Telegram only conflicts on Update consumption — outbound
+    HTTP is unconstrained beyond the documented rate limits, which we
+    enforce with one global + per-chat `aiolimiter` pair. Alternatives
+    considered (Redis outbox + bot drain, or refactoring `bot/` into a
+    shared library) were rejected as either adding hops or introducing
+    a single-process bottleneck for a horizontally scalable concern.
+17. **Suppress-but-still-persist + still-mark-fired.** Muted /
+    quiet-hours / `PAUSED` alerts hit `alerts_sent` with `delivered=False`
+    and `delivery_error="suppressed: <reason>"`; the Redis dedup TTL key
+    is set just like a delivered alert. Reason: unmute should not replay
+    a thundering herd of stale warnings. Audit trail wins over "did the
+    user receive it" — the latter is reconstructible from `delivered`.
+    Dedup TTL cooldowns: `*_HIT` = 1h (milestones, rare), `*_WARNING` =
+    5m (heads-up, re-arm fast), `VOLUME_SPIKE` = 10m (between the two).
 
 ## Known Risks / Watch Items
 

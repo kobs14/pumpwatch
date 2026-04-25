@@ -7,7 +7,9 @@ substitute a client without triggering a real connection at import time.
 
 Roles on the single Redis instance (see ADR in PROJECT_STATUS.md):
     - Celery broker + result backend (``celery:*`` keys)
-    - Hot cache: ``pw:price:<addr>`` → JSON snapshot view
+    - Hot cache: ``pw:price:<addr>`` → JSON snapshot view; and
+      ``pw:alert:<user_id>:<addr>:<alert_type>`` → dedup TTL keys
+      owned by the Session 6 alert engine. Same role, two namespaces.
     - Pub-sub: ``pw:price.updated`` → fire-and-forget event stream
 
 The cache and pub-sub helpers are intentionally thin so callers own the
@@ -25,7 +27,7 @@ from typing import Any, Final
 import redis.asyncio as aioredis
 
 from pumpwatch.config import get_settings
-from pumpwatch.db.enums import Priority
+from pumpwatch.db.enums import AlertType, Priority
 
 CACHE_KEY_PREFIX: Final[str] = "pw:price:"
 """Prefix for hot-cache keys. ``pw:price:<solana-mint-address>``."""
@@ -33,10 +35,25 @@ CACHE_KEY_PREFIX: Final[str] = "pw:price:"
 PRICE_UPDATED_CHANNEL: Final[str] = "pw:price.updated"
 """Global pub-sub channel for ``price.updated`` events."""
 
+ALERT_DEDUP_PREFIX: Final[str] = "pw:alert:"
+"""Prefix for alert-dedup TTL keys.
+
+Layout: ``pw:alert:<user_id>:<token_address>:<alert_type>``. Sibling
+namespace under the existing cache role — not a new Redis role
+(see ADR #13). The Session 6 alert engine SETs these with a per-type
+TTL so a re-fire inside the cooldown window is suppressed without a
+DB round trip; ``recent_for_subscription`` is the DB-side backstop.
+"""
+
 
 def cache_key_for(address: str) -> str:
     """Return the canonical hot-cache key for a token address."""
     return f"{CACHE_KEY_PREFIX}{address}"
+
+
+def alert_dedup_key(user_id: int, address: str, alert_type: AlertType) -> str:
+    """Return the canonical dedup key for one user × token × alert type."""
+    return f"{ALERT_DEDUP_PREFIX}{user_id}:{address}:{alert_type.value}"
 
 
 def ttl_for_tier(tier: Priority) -> int:

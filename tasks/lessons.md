@@ -152,3 +152,31 @@ mistake or make a better choice.
 - **Lesson:** Pre-existing `celerybeat-schedule` file-permission bug in the `scheduler` compose service (Beat can't write its persistent-schedule GDBM file inside `/app`) is unrelated to Session 5 but blocks the full compose smoke.
   **Context:** Bringing up `docker compose up -d scheduler worker` produced a CRITICAL Beat loop on the scheduler; the worker itself booted cleanly and processed a hand-dispatched `fetch_token` (successfully exercising the new silent-skip path against the still-CF-blocked Pump.fun endpoint).
   **Action:** Not in scope for Session 5 — file a separate hardening item for Session 7 ("pin Beat state to a writable path or switch to a DB-backed schedule"). The compose smoke coverage is still meaningful: worker boots, registers tasks, consumes from Redis, routes through the Session 5 code path, returns the new `{"fetched": False, "error": "unavailable"}` shape.
+
+## Session 6 — 2026-04-25
+
+- **Lesson:** Real-Redis integration tests must clean their own dedup keys at start; the `alerts_sessionmaker` TRUNCATE resets the DB but leaves Redis state. Re-run within a cooldown window and the second run dedupes against the first run's key.
+  **Context:** `tests/integration/test_alerts_real_redis.py` passed on a fresh Redis but failed on the second invocation — the `pw:alert:1:tokALERT1:growth_hit` key from run #1 was still live (TTL=3600s), so run #2 saw `alerts.dedup.skip` and the dispatcher never fired.
+  **Action:** Added a `scan_iter(match=f"pw:alert:*:{_ADDR}:*")` + `delete` sweep at the top of the test, before subscribing. Pattern is reusable for any future test that exercises a stateful Redis path against a non-ephemeral instance.
+
+- **Lesson:** SQLAlchemy strict-mypy expects enum *instances*, not their `.value`, when initialising a `Mapped[StrEnum]` column.
+  **Context:** Tests originally constructed `Subscription(...)` without setting `priority` and then assigned `sub.priority = Priority.HIGH.value` (a `str`). Strict mypy flagged this as `Incompatible types in assignment (expression has type "str", variable has type "SQLCoreOperations[Priority] | Priority")`. The Session 4 lesson about *reading* `Mapped[StrEnum]` columns back as plain `str` is still true — but the *write* path types check against the enum.
+  **Action:** Pass `priority=Priority.HIGH` (the enum) into the constructor, not via post-construction assignment. `==` comparison against the read-back `str` still works because `StrEnum` is a `str` subclass.
+
+- **Lesson:** `python-telegram-bot` v22's `telegram.Bot` runs alongside an `Application`-based long-poller on the same token without conflict, as long as only one process calls `getUpdates`.
+  **Context:** Session 6's design question was whether the alerts service should reuse the bot service's PTB `Application` (via Redis outbox / pub-sub bridge) or build its own `telegram.Bot`. The simpler standalone-Bot path was chosen on the basis that Telegram serializes Update consumption per token — bot service owns that — but outbound HTTP is rate-limited only by the documented per-chat / global limits (we enforce both with `aiolimiter`).
+  **Action:** Pattern: `bot = telegram.Bot(token=...); await bot.initialize(); await bot.send_message(...); await bot.shutdown()`. The dispatcher class holds the Bot for the lifetime of the alerts service. Wrap construction (`build_dispatcher`) and per-call RPC separately for the Session 5 two-layer defensive shape.
+
+- **Lesson:** `User.timezone` columns store an IANA name as raw `Text`; `zoneinfo.ZoneInfo(name)` raises `ZoneInfoNotFoundError` on garbage input. Don't blow up the alert engine over a bad string the user typed into `/settings`.
+  **Context:** `is_suppressed` does timezone-aware quiet-hours math via `zoneinfo`. A typo'd `"Mars/Olympus"` would otherwise propagate as an exception, and per the no-bare-except rule, propagate up the loop.
+  **Action:** Fall back to UTC + log `alerts.suppression.unknown_timezone` on `ZoneInfoNotFoundError`. Same fallback for NULL `timezone`. Tests cover both `"Mars/Olympus"` and `None`. Wrap-around windows (23:00→06:00) and DST forward (Europe/Berlin 2026-03-29 02:00 local → 03:00 local) are explicit test cases — `astimezone(zone).timetz()` handles both correctly because the conversion picks up the right offset for the absolute UTC instant.
+
+- **Lesson:** `PriceSnapshotRepository.history_for_token` returns the freshly-committed current snapshot too — by the time the alert engine receives the pub-sub event, the worker's own snapshot is in the DB. Pass it into the median+MAD detector and you're biasing against yourself.
+  **Context:** `_load_volume_history` filters `r.ts < event_ts` after fetching to drop the bar that triggered the event. Cleaner than altering the repo signature for a single caller — `history_for_token(since, limit)` stays general-purpose.
+  **Action:** Filter in caller, not in repo. If we ever add a third caller that needs the same exclusion, lift to a repo arg.
+
+- **Lesson:** `record(...)` flushes but does not commit; the alert id is populated only after the surrounding `session.begin()` exits. Three small transactions per dispatch (record → mark dedup-key → mark delivered/failed) are deliberate, not a refactor target.
+  **Context:** Plan called for "persist before dispatch." Each persistence step needs its own transaction because (a) we want the row visible *before* we hit the network, and (b) `mark_delivered` runs after the network call returns. Holding one transaction across the network is wrong: the row would be invisible to anyone reading `alerts_sent` while the dispatch was in flight, defeating the audit point.
+  **Action:** Three short `async with sm() as s, s.begin():` blocks per dispatched alert — one for `record`, one for `mark_delivered` or `mark_failed`. `_best_effort_mark_fired` to Redis sits between them; its failure is logged but does not block dispatch.
+
+- **Lesson:** Total tests went from 134 (Session 5 baseline) to 173 (Session 6) — a +39 net delta from 47 new alert tests minus an apparent earlier overcount. Worth re-counting at the end of Session 7 rather than trusting the running tally.

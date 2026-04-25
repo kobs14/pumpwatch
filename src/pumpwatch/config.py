@@ -62,6 +62,22 @@ class Settings(BaseSettings):
     TELEGRAM_PER_CHAT_MSG_PER_SEC: int = 1
     TELEGRAM_GLOBAL_MSG_PER_SEC: int = 25
 
+    # Alert engine — volume-spike detector window (median + MAD).
+    VOLUME_SPIKE_WINDOW_SECONDS: int = 3600
+    VOLUME_SPIKE_MIN_SAMPLES: int = 12
+
+    # Alert engine — Redis dedup-TTL cooldowns per alert type. *_HIT is the
+    # milestone (rare, long cooldown), *_WARNING is a heads-up (re-arm fast),
+    # VOLUME_SPIKE sits between the two.
+    ALERT_DEDUP_HIT_SECONDS: int = 3600
+    ALERT_DEDUP_WARNING_SECONDS: int = 300
+    ALERT_DEDUP_SPIKE_SECONDS: int = 600
+
+    # Alert engine — wait between the first and second Telegram dispatch
+    # attempt for the same alert. Two attempts max; on second failure the
+    # row is marked failed and the loop moves on (Session 7 owns retry).
+    ALERT_DISPATCH_RETRY_DELAY_SECONDS: float = 1.0
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -42,3 +42,4 @@ docker-compose.override.yml
 
 # Personal notes (not committed)
 NOTES.md
+NEXT_PROMPT.md
