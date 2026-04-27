@@ -16,6 +16,7 @@ from pumpwatch.bot.app import build_application
 from pumpwatch.config import get_settings
 from pumpwatch.db.session import dispose_engine, get_sessionmaker
 from pumpwatch.logging import configure_logging, get_logger
+from pumpwatch.observability.metrics import start_metrics_server
 
 logger = get_logger(__name__)
 
@@ -38,6 +39,7 @@ def run() -> None:
     """
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL, settings.ENVIRONMENT)
+    start_metrics_server(settings.METRICS_PORT_BOT)
 
     sessionmaker = get_sessionmaker()
     application = build_application(settings.TELEGRAM_BOT_TOKEN, sessionmaker)

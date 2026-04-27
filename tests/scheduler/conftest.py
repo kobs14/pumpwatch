@@ -1,36 +1,19 @@
-"""Scheduler-test fixtures.
-
-Mirrors ``tests/bot/conftest.py``: scheduler tasks open their own sessions
-(via ``get_sessionmaker``) and commit, so per-test isolation comes from a
-TRUNCATE in teardown, not the SAVEPOINT pattern used by repo tests.
-"""
+"""Scheduler-test fixtures: TRUNCATE-bracketed sessionmaker via the shared helper."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-_TRUNCATE_SQL = "TRUNCATE users, tokens, price_snapshots, api_call_log RESTART IDENTITY CASCADE"
+from tests._helpers.sessionmaker import CORE_TABLES, truncating_sessionmaker
 
 
 @pytest_asyncio.fixture
 async def scheduler_sessionmaker(
     test_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Yield a sessionmaker bound to the shared test engine.
-
-    Truncate on both sides of the yield: entry so we're never downstream of
-    another test file's leftover rows, and teardown so we leave the DB clean
-    for the next test to use.
-    """
-    async with test_engine.begin() as conn:
-        await conn.execute(text(_TRUNCATE_SQL))
-    maker = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    try:
+    """Yield a sessionmaker bound to the shared test engine, TRUNCATE-bracketed."""
+    async with truncating_sessionmaker(test_engine, tables=CORE_TABLES) as maker:
         yield maker
-    finally:
-        async with test_engine.begin() as conn:
-            await conn.execute(text(_TRUNCATE_SQL))

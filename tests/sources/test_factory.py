@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pumpwatch.config import get_settings
+from pumpwatch.sources.dexscreener import DexScreenerClient
 from pumpwatch.sources.factory import build_source
 from pumpwatch.sources.fake import FakePriceDataSource
 from pumpwatch.sources.pumpfun import PumpFunClient
@@ -41,6 +42,19 @@ def test_pumpfun_selected_returns_pumpfun_client(
     assert source.name == "pumpfun"
 
 
+def test_dexscreener_selected_returns_dexscreener_client(
+    monkeypatch: pytest.MonkeyPatch,
+    _sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "PRICE_SOURCE", "dexscreener")
+
+    source = build_source(_sessionmaker)
+
+    assert isinstance(source, DexScreenerClient)
+    assert source.name == "dexscreener"
+
+
 def test_fake_selected_returns_fake_source(
     monkeypatch: pytest.MonkeyPatch,
     _sessionmaker: async_sessionmaker[AsyncSession],
@@ -61,7 +75,7 @@ def test_unknown_value_raises(
     settings = get_settings()
     # Bypass the ``Literal`` at runtime; the defensive raise exists for
     # exactly this class of misconfiguration.
-    monkeypatch.setattr(settings, "PRICE_SOURCE", "dexscreener")
+    monkeypatch.setattr(settings, "PRICE_SOURCE", "wat")
 
     with pytest.raises(ValueError, match="unknown PRICE_SOURCE"):
         build_source(_sessionmaker)

@@ -49,7 +49,16 @@ class Settings(BaseSettings):
     # Worker data path: which ``PriceDataSource`` to build at worker startup.
     # ``fake`` returns an empty in-memory source (dev safeguard); real tests
     # monkey-patch the factory directly.
-    PRICE_SOURCE: Literal["pumpfun", "fake"] = "pumpfun"
+    PRICE_SOURCE: Literal["pumpfun", "dexscreener", "fake"] = "pumpfun"
+
+    # DexScreener (fallback / Pump.fun-CF-block path; ADR #14, ADR #20).
+    DEXSCREENER_BASE_URL: str = "https://api.dexscreener.com"
+    DEXSCREENER_RATE_LIMIT_PER_SEC: int = 5
+    DEXSCREENER_MAX_BATCH_SIZE: int = 30
+    DEXSCREENER_TIMEOUT_SECONDS: int = 10
+    DEXSCREENER_MAX_RETRY_ATTEMPTS: int = 5
+    DEXSCREENER_USER_AGENT: str = "pumpwatch/0.1 (+https://github.com/kobs14/pumpwatch)"
+    DEXSCREENER_LOG_CALLS: bool = True
 
     # Redis hot-cache TTL per subscription tier (seconds). HIGH is short so
     # the cache always expires before the next poll-cadence overwrite would
@@ -75,8 +84,36 @@ class Settings(BaseSettings):
 
     # Alert engine — wait between the first and second Telegram dispatch
     # attempt for the same alert. Two attempts max; on second failure the
-    # row is marked failed and the loop moves on (Session 7 owns retry).
+    # row is marked failed and the loop moves on. Reconciliation handles
+    # the persistent-failure case via the periodic Beat sweep below.
     ALERT_DISPATCH_RETRY_DELAY_SECONDS: float = 1.0
+
+    # Alert reconciliation Beat sweep. Picks up rows where
+    # ``delivered = False`` and ``delivery_error NOT LIKE 'suppressed:%'``
+    # (ADR #17 — never re-dispatch suppressed) created within the window
+    # and re-attempts dispatch up to MAX_ATTEMPTS times. Cap defaults to 1
+    # so each row is touched at most twice (once live, once reconciled).
+    ALERT_RECONCILE_INTERVAL_SECONDS: int = 300
+    ALERT_RECONCILE_WINDOW_SECONDS: int = 3600
+    ALERT_RECONCILE_MAX_ATTEMPTS: int = 1
+
+    # Worker DLQ: how many Celery-level retries fetch_token gets before its
+    # row lands in ``dlq_entries``. PumpFunClient/DexScreenerClient already
+    # retry 5x internally via tenacity; cap Celery retries at 1 so total
+    # HTTP attempts stay <=10 per logical poll.
+    WORKER_FETCH_MAX_CELERY_RETRIES: int = 1
+    WORKER_FETCH_RETRY_BACKOFF_SECONDS: int = 5
+
+    # Prometheus exporter ports. Each long-running service binds its own
+    # ``/metrics`` endpoint via prometheus_client.start_http_server. The
+    # worker uses multiproc mode (Celery prefork forks pool processes;
+    # counters incremented in children must aggregate to the parent).
+    METRICS_PORT_BOT: int = 9101
+    METRICS_PORT_SCHEDULER: int = 9102
+    METRICS_PORT_WORKER: int = 9103
+    METRICS_PORT_ALERTS: int = 9104
+    METRICS_GAUGE_REFRESH_SECONDS: int = 15
+    PROMETHEUS_MULTIPROC_DIR: str = "/tmp/pumpwatch-metrics"
 
 
 @lru_cache

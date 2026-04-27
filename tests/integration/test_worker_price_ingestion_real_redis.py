@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pumpwatch.cache.redis_client import PRICE_UPDATED_CHANNEL, cache_key_for
@@ -28,26 +28,19 @@ from pumpwatch.db.models import PriceSnapshot, Subscription, Token, User
 from pumpwatch.scheduler import tasks as scheduler_tasks
 from pumpwatch.sources.base import TokenSnapshot
 from pumpwatch.sources.fake import FakePriceDataSource
+from tests._helpers.sessionmaker import CORE_TABLES, truncating_sessionmaker
 from tests.celery_helpers import eager_celery  # noqa: F401  (fixture import)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("eager_celery")]
-
-_TRUNCATE_SQL = "TRUNCATE users, tokens, price_snapshots, api_call_log RESTART IDENTITY CASCADE"
 
 
 @pytest_asyncio.fixture
 async def scheduler_sessionmaker(
     test_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Local copy of the scheduler-package fixture — we're outside that package."""
-    async with test_engine.begin() as conn:
-        await conn.execute(text(_TRUNCATE_SQL))
-    maker = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    try:
+    """Bracketed by TRUNCATE; mirrors the scheduler-package fixture."""
+    async with truncating_sessionmaker(test_engine, tables=CORE_TABLES) as maker:
         yield maker
-    finally:
-        async with test_engine.begin() as conn:
-            await conn.execute(text(_TRUNCATE_SQL))
 
 
 def _redis_reachable(url: str) -> bool:

@@ -37,13 +37,14 @@ from pumpwatch.celery_app import celery
 from pumpwatch.config import get_settings
 from pumpwatch.db.enums import Priority
 from pumpwatch.db.models import PriceSnapshot
+from pumpwatch.db.repos.dlq import DlqRepository
 from pumpwatch.db.repos.price_snapshot import PriceSnapshotRepository
 from pumpwatch.db.repos.subscription import SubscriptionRepository
 from pumpwatch.db.session import get_sessionmaker
 from pumpwatch.logging import get_logger
 from pumpwatch.scheduler.batch import BatchItem, build_batch
 from pumpwatch.sources.base import PriceDataSource, TokenSnapshot
-from pumpwatch.sources.exceptions import PumpFunUnavailableError
+from pumpwatch.sources.exceptions import SourceUnavailableError
 from pumpwatch.sources.factory import build_source
 
 _log = get_logger(__name__)
@@ -221,15 +222,17 @@ async def _best_effort_publish(
 
 
 async def _fetch_token_async(token_address: str) -> dict[str, Any]:
+    """Inner async body — raises ``SourceUnavailableError`` on retry exhaustion.
+
+    The Celery wrapper below catches the exception, decides between
+    ``self.retry`` and a DLQ write, and preserves the silent-skip return
+    contract. This helper does not swallow source failures.
+    """
     sessionmaker = get_sessionmaker()
     log = _log.bind(token=_redact(token_address))
 
-    try:
-        async with _build_source(sessionmaker) as client:
-            snap = await client.fetch_one(token_address)
-    except PumpFunUnavailableError as exc:
-        log.warning("worker.fetch_token.unavailable", error=str(exc))
-        return {"address": token_address, "fetched": False, "error": "unavailable"}
+    async with _build_source(sessionmaker) as client:
+        snap = await client.fetch_one(token_address)
 
     if snap is None:
         log.info("worker.fetch_token.not_found")
@@ -247,6 +250,27 @@ async def _fetch_token_async(token_address: str) -> dict[str, Any]:
     return {"address": token_address, "fetched": True, "tier": tier.value}
 
 
+async def _dlq_write_async(token_address: str, error: str) -> None:
+    """Upsert a DLQ row from a Celery task body. Best-effort."""
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session, session.begin():
+            await DlqRepository(session).upsert(token_address, error)
+    except Exception as exc:
+        # Observability path: a DLQ-write failure is logged but never breaks
+        # the silent-skip return contract the scheduler depends on.
+        _log.warning(
+            "worker.dlq.write_failed",
+            token=_redact(token_address),
+            error=str(exc),
+        )
+
+
+def _dlq_write_sync(token_address: str, error: str) -> None:
+    """Sync wrapper around :func:`_dlq_write_async` for the Celery task body."""
+    asyncio.run(_dlq_write_async(token_address, error))
+
+
 @celery.task(name="pumpwatch.scheduler.fetch_batch", queue="default")  # type: ignore[untyped-decorator]
 def fetch_batch() -> dict[str, int]:
     """Beat-triggered. Rebuilds the batch and dispatches per-token fetches."""
@@ -257,7 +281,38 @@ def fetch_batch() -> dict[str, int]:
     name="pumpwatch.scheduler.fetch_token",
     queue="default",
     acks_late=True,
+    bind=True,
 )
-def fetch_token(token_address: str) -> dict[str, Any]:
-    """Fetch one token → persist snapshot → update cache → publish event."""
-    return asyncio.run(_fetch_token_async(token_address))
+def fetch_token(self: Any, token_address: str) -> dict[str, Any]:
+    """Fetch one token → persist snapshot → update cache → publish event.
+
+    Source-unavailable errors trigger a Celery retry with exponential
+    backoff up to ``WORKER_FETCH_MAX_CELERY_RETRIES``. On retry
+    exhaustion, the failure is upserted into ``dlq_entries`` and the
+    silent-skip return dict is preserved so the scheduler's re-dispatch
+    logic stays unchanged. Total HTTP attempts per logical poll =
+    (Celery tries) * (PumpFunClient/DexScreenerClient tenacity attempts)
+    = 2 * 5 = 10 with default settings.
+    """
+    settings = get_settings()
+    try:
+        return asyncio.run(_fetch_token_async(token_address))
+    except SourceUnavailableError as exc:
+        max_retries = settings.WORKER_FETCH_MAX_CELERY_RETRIES
+        if self.request.retries < max_retries:
+            countdown = settings.WORKER_FETCH_RETRY_BACKOFF_SECONDS * (2**self.request.retries)
+            _log.warning(
+                "worker.fetch_token.retry",
+                token=_redact(token_address),
+                attempt=self.request.retries + 1,
+                countdown=countdown,
+                error=str(exc),
+            )
+            raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries) from exc
+        _log.warning(
+            "worker.fetch_token.dlq",
+            token=_redact(token_address),
+            error=str(exc),
+        )
+        _dlq_write_sync(token_address, str(exc))
+        return {"address": token_address, "fetched": False, "error": "unavailable"}

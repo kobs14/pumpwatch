@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: pumpwatch-bot
+    static_configs:
+      - targets: ["bot:9101"]
+        labels:
+          service: bot
+
+  - job_name: pumpwatch-scheduler
+    static_configs:
+      - targets: ["scheduler:9102"]
+        labels:
+          service: scheduler
+
+  - job_name: pumpwatch-worker
+    static_configs:
+      - targets: ["worker:9103"]
+        labels:
+          service: worker
+
+  - job_name: pumpwatch-alerts
+    static_configs:
+      - targets: ["alerts:9104"]
+        labels:
+          service: alerts

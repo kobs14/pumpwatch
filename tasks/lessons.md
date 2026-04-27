@@ -180,3 +180,43 @@ mistake or make a better choice.
   **Action:** Three short `async with sm() as s, s.begin():` blocks per dispatched alert — one for `record`, one for `mark_delivered` or `mark_failed`. `_best_effort_mark_fired` to Redis sits between them; its failure is logged but does not block dispatch.
 
 - **Lesson:** Total tests went from 134 (Session 5 baseline) to 173 (Session 6) — a +39 net delta from 47 new alert tests minus an apparent earlier overcount. Worth re-counting at the end of Session 7 rather than trusting the running tally.
+
+## Session 7 — 2026-04-27
+
+- **Lesson:** Celery's eager mode does not silently re-run a task on `self.retry(...)` — the `Retry` exception propagates out of `apply()`/`delay().get()` and `EagerResult.get()` re-raises it. So a test that asserts the post-retry-exhaustion behaviour cannot rely on Celery's retry machinery to drive multiple eager iterations.
+  **Context:** Session 7 worker DLQ wired `self.retry(exc=..., countdown=..., max_retries=settings.WORKER_FETCH_MAX_CELERY_RETRIES)` in the outer task body. With the production default `max_retries=1`, eager-mode tests of "fake source raises → DLQ row written" failed because the FIRST eager call raised `Retry` and propagated; the second call never ran.
+  **Action:** Tests of the DLQ path `monkeypatch.setattr(get_settings(), "WORKER_FETCH_MAX_CELERY_RETRIES", 0)` so the first failure goes straight to the exhausted branch. The retry path is still exercised in production via Celery's real broker (no eager mode there). Document the constraint: **production retry behaviour is not unit-testable in eager mode.**
+
+- **Lesson:** `prometheus_client` decides whether a Counter/Gauge uses in-process storage or `MultiProcessFileBasedMetric` storage at *Counter-construction time*, by reading `PROMETHEUS_MULTIPROC_DIR` from `os.environ`. Setting the env var inside a Celery `worker_init` signal handler is too late — by then `pumpwatch.observability.metrics` has been imported (transitively, via `pumpwatch.alerts.subscriber` etc.) and every counter handle is already in single-process mode.
+  **Context:** Session 7 wired per-service `/metrics` endpoints. The Celery worker uses `--concurrency=4` (prefork pool); without multiproc mode the master process binds the port and serves zeros because all task work runs in forked children whose counter increments stay private.
+  **Action:** Set `PROMETHEUS_MULTIPROC_DIR=/tmp/pumpwatch-metrics` at the **container** layer (`docker-compose.yml` worker service env), not in code. The worker container has it; the bot/scheduler/alerts containers don't. `start_metrics_server` reads the same env var on bind to choose between `MultiProcessCollector` and the default `REGISTRY`. ADR #19 captures the choice.
+
+- **Lesson:** `redis.asyncio.Redis.llen(key)` is typed as `Awaitable[int] | int` because the same method object is used across sync and async contexts. `await client.llen(...)` is correct but mypy strict flags the `Awaitable[int] | int` shape; `int(await client.llen(...))` doesn't help.
+  **Context:** Session 7's `refresh_gauges` task polls Redis queue depths. Strict mypy refused `await client.llen(queue)`.
+  **Action:** `await cast(Awaitable[int], client.llen(queue))`. Don't try to coerce with `int(...)` — the cast is the cleanest fix until redis-py's stubs split sync/async.
+
+- **Lesson:** Celery signals like `worker_init.connect` and `beat_init.connect` need `# type: ignore[untyped-decorator]` on the same line as the decorator, *not* `[no-untyped-call]` or `[misc]`. Despite signal connect being a method call (which usually triggers `no-untyped-call`), strict mypy reports it as an `untyped-decorator` issue against the decorated function.
+  **Context:** Session 7 wired `@worker_init.connect` and `@beat_init.connect` to bind Prometheus per-process. Tried `[misc]` first (per Session 6 lesson on plain `@celery.task`) — wrong code. Then tried `[no-untyped-call,untyped-decorator,misc]` together — only `untyped-decorator` was actually used.
+  **Action:** Use exactly `# type: ignore[untyped-decorator]` on the decorator line. Same tag celery's `@celery.task(...)` already uses.
+
+- **Lesson:** A Postgres `dlq_entries` table satisfies "durable, queryable, no fifth Redis namespace" cleanly *if* the upsert is `pg_insert(...).on_conflict_do_update(constraint="uq_...", set_={"attempts": Table.c.attempts + 1, ...})`. Combined with a manual `self.retry` (not `autoretry_for`), the DLQ write happens in exactly one branch (`self.request.retries >= max_retries`), so `attempts` cannot accidentally double-bump.
+  **Context:** Plan agent flagged the "DLQ double-write" risk where `autoretry_for` plus a manual `try/except` could both write to the DLQ on the same logical failure. Manual retry concentrates the upsert call site; `UNIQUE(token_address)` on-conflict-update absorbs concurrent failures.
+  **Action:** Pattern: `bind=True` on the task; in the except branch, `if self.request.retries < max_retries: raise self.retry(...) from exc` else upsert + return the silent-skip dict. Tests verify `attempts == 1` after one logical failure and `attempts == 2` after a second logical failure of the same token.
+
+- **Lesson:** DexScreener's `/latest/dex/tokens/{addresses}` endpoint returns a single `pairs[]` array spanning every chain/DEX where any of the requested addresses trades. To resolve back to addresses you have to filter by `chainId == "solana"` AND `baseToken.address == address` — the response order is not guaranteed and one address can produce multiple pairs (Raydium, Orca, ...). Pick the highest `liquidity.usd` per address.
+  **Context:** Session 7 implemented DexScreener as the ADR #14 fallback source. Initial naive parser took the first pair; on a real response with multiple Raydium pools that would have been arbitrary.
+  **Action:** `_select_pair(payload_pairs, address)` filters then `max(..., key=liquidity.usd)`. `_parse_pair` maps the chosen pair into `TokenSnapshot`. `holder_count` is `None` because DexScreener doesn't expose it (Pump.fun does, but only when the CF block lifts).
+
+- **Lesson:** Celery's eager mode requires the `eager_celery` fixture be applied via `pytest.mark.usefixtures("eager_celery")` *or* taken as a parameter, but not both. Importing the fixture name and naming a parameter `eager_celery` triggers ruff `F811` redefinition.
+  **Context:** Session 7's reconciler test needed eager mode for one test only (the rest call the async helper directly). Tried both `from tests.celery_helpers import eager_celery` AND `eager_celery: None` parameter — ruff caught the shadowing.
+  **Action:** Use the decorator `@pytest.mark.usefixtures("eager_celery")` on the single test that needs it; keep the import for fixture discoverability. Same shape as the existing scheduler tests' `pytestmark = pytest.mark.usefixtures("eager_celery")`.
+
+- **Lesson:** Container-level `USER pumpwatch` plus `WORKDIR /app` means anything Celery Beat tries to write under `/app` (notably its default `celerybeat-schedule` GDBM file) gets `[Errno 13] Permission denied`. The fix is `--schedule /tmp/celerybeat-schedule` in the scheduler command — `/tmp` is writable by every user. Beat's persistent schedule rebuilds from `celery_app.py` on every restart, so losing the file across restarts is fine for our shape.
+  **Context:** Pre-existing Session 4 bug; Session 5 noted the worker came up clean while Beat crashed on startup. Session 7 picked the smallest fix.
+  **Action:** Append `--schedule /tmp/celerybeat-schedule` to the scheduler container's command. No Dockerfile change. Documented in `docker-compose.yml`.
+
+- **Lesson:** `redis-py 7.4` pubsub stubs still don't type `aclose()`. The existing `# type: ignore[no-untyped-call]` on `await pubsub.aclose()` call sites stays. `Redis.aclose()` (different from `PubSub.aclose()`) DID get typed, so a future cleanup can split the two.
+  **Context:** Session 7 cleanup item said "drop the ignores once upstream stubs catch up". Removed one and ran mypy strict — still untyped.
+  **Action:** Defer to a future session. When upstream catches up, grep `no-untyped-call` and re-test.
+
+- **Lesson:** Total tests went from 173 (Session 6) to 210 (Session 7) — net +37 from 23 DexScreener client + factory tests, 3 DLQ repo tests, 2 scheduler DLQ tests, 7 reconciler tests, and 6 Prometheus / metrics tests. No flakiness in the integration suite once the `dlq_entries` truncate was added to the shared CORE_TABLES list.

@@ -20,7 +20,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pumpwatch.alerts.subscriber import run as run_subscriber
@@ -28,10 +28,10 @@ from pumpwatch.cache.redis_client import PRICE_UPDATED_CHANNEL, cache_key_for
 from pumpwatch.config import get_settings
 from pumpwatch.db.enums import AlertType, Priority
 from pumpwatch.db.models import AlertSent, Subscription, Token, User
+from tests._helpers.sessionmaker import CORE_TABLES, truncating_sessionmaker
 
 pytestmark = [pytest.mark.integration]
 
-_TRUNCATE_SQL = "TRUNCATE users, tokens, price_snapshots, api_call_log RESTART IDENTITY CASCADE"
 _ADDR = "tokALERT1"
 
 
@@ -39,14 +39,8 @@ _ADDR = "tokALERT1"
 async def alerts_sessionmaker(
     test_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    async with test_engine.begin() as conn:
-        await conn.execute(text(_TRUNCATE_SQL))
-    maker = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    try:
+    async with truncating_sessionmaker(test_engine, tables=CORE_TABLES) as maker:
         yield maker
-    finally:
-        async with test_engine.begin() as conn:
-            await conn.execute(text(_TRUNCATE_SQL))
 
 
 def _redis_reachable(url: str) -> bool:

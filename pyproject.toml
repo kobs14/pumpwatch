@@ -17,6 +17,7 @@ dependencies = [
     "python-telegram-bot[job-queue]>=21",
     "celery>=5.3,<6",
     "redis>=5.0",
+    "prometheus-client>=0.20",
 ]
 
 [dependency-groups]

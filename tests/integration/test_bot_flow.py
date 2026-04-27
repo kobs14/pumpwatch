@@ -7,11 +7,12 @@ tests use. Asserts DB state at each step rather than message copy.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import cast
 
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -22,6 +23,7 @@ from pumpwatch.bot.handlers.start import cmd_start
 from pumpwatch.bot.handlers.stop import cmd_stop
 from pumpwatch.db.enums import SubscriptionStatus
 from pumpwatch.db.models import Subscription, Token, User
+from tests._helpers.sessionmaker import BOT_TABLES, truncating_sessionmaker
 from tests.bot.harness import make_update_context
 
 MINT_A = "So11111111111111111111111111111111111111112"
@@ -32,12 +34,12 @@ TG_ID = 999001
 @pytest_asyncio.fixture
 async def bot_sessionmaker(
     test_engine: AsyncEngine,
-) -> async_sessionmaker[AsyncSession]:
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """Truncate before yield so the flow test starts with a known-empty DB."""
-    maker = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    async with test_engine.begin() as conn:
-        await conn.execute(text("TRUNCATE users, tokens, price_snapshots RESTART IDENTITY CASCADE"))
-    return maker
+    async with truncating_sessionmaker(
+        test_engine, tables=BOT_TABLES, truncate_on_exit=False
+    ) as maker:
+        yield maker
 
 
 async def test_full_flow(

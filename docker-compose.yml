@@ -84,13 +84,18 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
       REDIS_URL: redis://redis:6379/0
-    command: celery -A pumpwatch.celery_app beat --loglevel=INFO
+    # /tmp is writable by the non-root pumpwatch user; default ./celerybeat-schedule
+    # path is not. Schedule is rebuilt from celery_app.py on each restart, so
+    # losing it is fine for our shape.
+    command: celery -A pumpwatch.celery_app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
     volumes:
       - ./src:/app/src
     restart: unless-stopped
 
-  # Horizontally scalable: Session 7 will manage replica counts and
-  # per-tier worker pools.
+  # Horizontally scalable Celery worker pool. PROMETHEUS_MULTIPROC_DIR
+  # must be set BEFORE Python boots so prometheus_client picks up
+  # multiproc mode at Counter-construction time — that's why it's an
+  # env override here rather than a runtime call.
   worker:
     build:
       context: .
@@ -105,6 +110,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://pumpwatch:pumpwatch@postgres:5432/pumpwatch
       REDIS_URL: redis://redis:6379/0
+      PROMETHEUS_MULTIPROC_DIR: /tmp/pumpwatch-metrics
     command: >
       celery -A pumpwatch.celery_app worker
       --loglevel=INFO -Q default,high,medium,low --concurrency=4
@@ -134,6 +140,38 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
+  # Optional observability stack. Bring up with:
+  #   docker compose --profile observability up
+  # Default `docker compose up` does NOT start these services.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: [observability]
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - pumpwatch_prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: [observability]
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - pumpwatch_grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
 volumes:
   pumpwatch_pg_data:
   pumpwatch_redis_data:
+  pumpwatch_prometheus_data:
+  pumpwatch_grafana_data:

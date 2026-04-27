@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -59,6 +60,12 @@ class AlertSent(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     delivery_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Counts dispatch attempts (1 = the live-path attempt that wrote the
+    # row). Reconciliation increments this on each re-dispatch and skips
+    # rows that have already hit ``ALERT_RECONCILE_MAX_ATTEMPTS + 1``.
+    dispatch_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

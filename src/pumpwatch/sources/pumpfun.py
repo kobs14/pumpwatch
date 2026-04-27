@@ -28,6 +28,7 @@ from tenacity import (
 from pumpwatch.config import Settings, get_settings
 from pumpwatch.db.repos.api_call_log import ApiCallLogRepository
 from pumpwatch.logging import get_logger
+from pumpwatch.observability.metrics import SOURCE_CALLS
 from pumpwatch.sources.base import TokenSnapshot
 from pumpwatch.sources.exceptions import PumpFunUnavailableError
 
@@ -90,6 +91,15 @@ _RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     aiohttp.ClientError,
     TimeoutError,
 )
+
+
+def _status_label(status_code: int, success: bool) -> str:
+    """Map (status_code, success) into the ``SOURCE_CALLS`` ``status`` label."""
+    if status_code == 404:
+        return "not_found"
+    if success:
+        return "ok"
+    return "unavailable"
 
 
 class PumpFunClient:
@@ -183,6 +193,13 @@ class PumpFunClient:
                     # path. A logging bug is a warning, not a caller-visible
                     # exception.
                     _log.warning("pumpfun.log_call.outer_failed", error=str(log_exc))
+            try:
+                SOURCE_CALLS.labels(
+                    source=self.name,
+                    status=_status_label(status_code, success),
+                ).inc()
+            except Exception as metric_exc:
+                _log.warning("pumpfun.metric.failed", error=str(metric_exc))
 
     async def _fetch_one_with_retries(self, address: str) -> TokenSnapshot | None:
         log = _log.bind(address=_redact(address))

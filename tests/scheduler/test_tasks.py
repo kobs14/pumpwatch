@@ -21,8 +21,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pumpwatch.cache.redis_client import PRICE_UPDATED_CHANNEL, cache_key_for
+from pumpwatch.config import get_settings
 from pumpwatch.db.enums import Priority, SubscriptionStatus
-from pumpwatch.db.models import PriceSnapshot, Subscription, Token, User
+from pumpwatch.db.models import DlqEntry, PriceSnapshot, Subscription, Token, User
 from pumpwatch.scheduler import tasks as scheduler_tasks
 from pumpwatch.sources.base import TokenSnapshot
 from pumpwatch.sources.fake import FakePriceDataSource
@@ -276,12 +277,21 @@ async def test_fetch_token_returns_not_found_when_source_has_nothing(
     assert result == {"address": "missing", "fetched": False, "reason": "not_found"}
 
 
-async def test_fetch_token_silent_skip_on_unavailable(
+async def test_fetch_token_unavailable_lands_in_dlq_after_retry(
     scheduler_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     fake_redis: aioredis.Redis,
 ) -> None:
-    """PumpFunUnavailableError → warn + return fetched=False; no rows written."""
+    """SourceUnavailableError exhausts the retry budget, lands in dlq_entries.
+
+    The silent-skip return shape is preserved so the scheduler's
+    re-dispatch logic stays unchanged. No PriceSnapshot or Redis cache.
+    Eager mode does not re-run the task body on ``self.retry``, so we
+    pin ``WORKER_FETCH_MAX_CELERY_RETRIES=0`` to drive the exhausted-path
+    directly. The retry path is exercised in production via Celery's
+    real broker, not eager mode.
+    """
+    monkeypatch.setattr(get_settings(), "WORKER_FETCH_MAX_CELERY_RETRIES", 0)
     await _seed_one_active_sub(scheduler_sessionmaker, address="tokDOWN")
     fake = FakePriceDataSource({}, fail_addresses={"tokDOWN"})
     monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
@@ -302,7 +312,42 @@ async def test_fetch_token_silent_skip_on_unavailable(
         )
         assert rows == []
 
+        dlq = (
+            (await session.execute(select(DlqEntry).where(DlqEntry.token_address == "tokDOWN")))
+            .scalars()
+            .all()
+        )
+        assert len(dlq) == 1
+        assert dlq[0].attempts == 1
+        assert "fake forced failure" in dlq[0].error
+
     assert await fake_redis.get(cache_key_for("tokDOWN")) is None
+
+
+async def test_fetch_token_dlq_upsert_bumps_attempts_on_repeat_failure(
+    scheduler_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis: aioredis.Redis,  # noqa: ARG001 — prevents real Redis dial
+) -> None:
+    """Same address failing twice across two task runs → attempts=2, single row."""
+    monkeypatch.setattr(get_settings(), "WORKER_FETCH_MAX_CELERY_RETRIES", 0)
+    await _seed_one_active_sub(scheduler_sessionmaker, address="tokFLAP")
+    fake = FakePriceDataSource({}, fail_addresses={"tokFLAP"})
+    monkeypatch.setattr(scheduler_tasks, "_build_source", lambda _sm: fake)
+    monkeypatch.setattr(scheduler_tasks, "get_sessionmaker", lambda: scheduler_sessionmaker)
+
+    await _run_fetch_token("tokFLAP")
+    await _run_fetch_token("tokFLAP")
+
+    async with scheduler_sessionmaker() as session:
+        dlq = (
+            (await session.execute(select(DlqEntry).where(DlqEntry.token_address == "tokFLAP")))
+            .scalars()
+            .all()
+        )
+        assert len(dlq) == 1, "UNIQUE(token_address) must absorb the second logical failure"
+        assert dlq[0].attempts == 2
+        assert dlq[0].first_seen <= dlq[0].last_seen
 
 
 async def test_fetch_token_cache_failure_does_not_break_snapshot(

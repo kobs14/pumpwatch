@@ -51,6 +51,11 @@ from pumpwatch.db.repos.alert import AlertRepository
 from pumpwatch.db.repos.price_snapshot import PriceSnapshotRepository
 from pumpwatch.db.repos.subscription import SubscriptionRepository
 from pumpwatch.logging import get_logger
+from pumpwatch.observability.metrics import (
+    ALERTS_DELIVERY_FAILED,
+    ALERTS_FIRED,
+    ALERTS_SUPPRESSED,
+)
 
 _log = get_logger(__name__)
 
@@ -225,10 +230,12 @@ async def _process_candidate(
     reason = is_suppressed(user, subscription, now_utc)
 
     alert_id = await _persist_alert(sessionmaker, subscription.id, candidate)
+    ALERTS_FIRED.labels(type=candidate.alert_type.value).inc()
     await _best_effort_mark_fired(redis_client, user.id, address, candidate, ttl_seconds)
 
     if reason is not None:
         await _mark_failed(sessionmaker, alert_id, f"suppressed: {reason}")
+        ALERTS_SUPPRESSED.labels(reason=reason).inc()
         _log.info(
             "alerts.suppressed",
             address=_redact(address),
@@ -243,6 +250,7 @@ async def _process_candidate(
         await dispatcher.send_alert(user.chat_id, text)
     except Exception as exc:  # noqa: BLE001 — already retried inside dispatcher
         await _mark_failed(sessionmaker, alert_id, str(exc))
+        ALERTS_DELIVERY_FAILED.inc()
         _log.warning(
             "alerts.dispatch.failed",
             address=_redact(address),

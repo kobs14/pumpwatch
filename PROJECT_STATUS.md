@@ -5,10 +5,10 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 6
-**Last Session Completed:** Session 6 — Alert Engine: Thresholds + Volume Spike
-**Next Session:** Session 7 — Hardening: Observability, Error Handling, Scale
-**Last Updated:** 2026-04-25
+**Phase:** Post-Session 7
+**Last Session Completed:** Session 7 — Hardening: Observability, Error Handling, Scale
+**Next Session:** Session 8 — Documentation, README, Deployment Guide
+**Last Updated:** 2026-04-27
 
 ## Session Plan
 
@@ -21,7 +21,7 @@ It is updated at the end of every session.
 | 4  | Scheduler & Batch Builder                       | ✅ done | Celery app + Beat, pure priority/batch modules, per-sub tier persistence, ApiCallLog wired into PumpFunClient, scheduler + worker compose services, 37 new tests |
 | 5  | Worker Pool & Price Ingestion                   | ✅ done | fetch_token writes PriceSnapshot + pw:price:<addr> hot cache (tier-varying TTL) + pw:price.updated pub-sub; PRICE_SOURCE setting + factory; silent-skip on PumpFunUnavailableError; best-effort cache/pub-sub; fakeredis unit + real-Redis integration tests (39 new) |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ✅ done | `alerts` service: subscribe to `pw:price.updated`, threshold + median+MAD detectors, Redis-TTL dedup under `pw:alert:*`, suppression (mute/PAUSED/quiet-hours w/ tz + DST), persist-then-dispatch via standalone `telegram.Bot`, 47 new tests |
-| 7  | Hardening: Observability, Error Handling, Scale | ⬜      | Prometheus, Grafana, dead-letter queue, load test |
+| 7  | Hardening: Observability, Error Handling, Scale | ✅ done | DexScreener client, Postgres `dlq_entries` + Celery retry/backoff, alert reconciliation Beat sweep, per-service Prometheus `/metrics` + Grafana profile, `celerybeat-schedule` permission fix, fixture consolidation. 210 tests. |
 | 8  | Documentation, README, Deployment Guide         | ⬜      | Architecture diagrams, ADRs, deploy guide |
 
 ## Files Created So Far
@@ -125,6 +125,33 @@ Session 6 modified:
 - `.env.example` (+6 documented settings)
 - `docker-compose.yml` (+`alerts` service: single replica, `restart: unless-stopped`, env-overridden `DATABASE_URL`/`REDIS_URL`)
 
+Session 7:
+- `alembic/versions/3868863a7a4d_add_dlq_entries_and_alerts_sent_.py` — creates `dlq_entries` (with `UNIQUE(token_address)`); adds `alerts_sent.dispatch_attempts` (default 1) for the reconciler attempt cap
+- `src/pumpwatch/sources/dexscreener.py` — `DexScreenerClient` (Protocol-compatible: `fetch_one` / `fetch_batch` against `/latest/dex/tokens/{a,b,c}`, tenacity retry, api_call_log writes, highest-liquidity Solana pair selection)
+- `src/pumpwatch/db/models/dlq_entry.py`, `src/pumpwatch/db/repos/dlq.py` — `DlqEntry` model + `DlqRepository.upsert/count` (pg-insert on-conflict bumps `attempts` + `last_seen`)
+- `src/pumpwatch/alerts/reconciler.py`, `src/pumpwatch/alerts/tasks.py` — Beat-driven sweep: re-checks suppression, rehydrates `AlertCandidate` from `payload_json`, re-dispatches via the same `TelegramDispatcher`, increments `dispatch_attempts`. Skips suppressed rows (ADR #17).
+- `src/pumpwatch/observability/{__init__,metrics,tasks}.py` — centralised Prometheus handles (`pumpwatch_alerts_fired_total{type}`, `*_suppressed_total{reason}`, `*_delivery_failed_total`, `pumpwatch_source_calls_total{source,status}`, `pumpwatch_celery_queue_depth{queue}`, `pumpwatch_dlq_size`); idempotent `start_metrics_server` with multiproc support; Beat-scheduled `refresh_gauges` task polls Postgres + Redis
+- `ops/prometheus/prometheus.yml`, `ops/grafana/provisioning/{datasources,dashboards}/*.yml`, `ops/grafana/dashboards/pumpwatch.json` — provisioning files for the optional observability profile
+- `tests/_helpers/{__init__,sessionmaker}.py` — shared `truncating_sessionmaker` helper (CORE_TABLES / BOT_TABLES presets); replaces five duplicated truncate-style fixtures
+- `tests/sources/test_dexscreener_client.py`, `tests/db/test_dlq_repo.py`, `tests/alerts/test_reconciler.py`, `tests/observability/test_metrics.py` — 37 new tests (210 total, +37 from Session 6 baseline)
+
+Session 7 modified:
+- `pyproject.toml` (+prometheus-client>=0.20)
+- `uv.lock` regenerated
+- `src/pumpwatch/config.py` (+`PRICE_SOURCE` accepts `dexscreener`; +DexScreener block; +DLQ retry caps; +reconciler cadence; +metrics ports + multiproc dir)
+- `.env.example` (+13 documented settings)
+- `src/pumpwatch/sources/exceptions.py` — adds shared `SourceError` / `SourceUnavailableError` parents; `PumpFunUnavailableError` and new `DexScreenerUnavailableError` both inherit from `SourceUnavailableError` so the worker catches one symbol
+- `src/pumpwatch/sources/factory.py` — adds `dexscreener` branch (one elif)
+- `src/pumpwatch/sources/pumpfun.py` — `SOURCE_CALLS{source,status}` counter increment in the `finally` next to `api_call_log`
+- `src/pumpwatch/scheduler/tasks.py` — outer Celery task body wraps the inner async helper with `self.retry` (capped at `WORKER_FETCH_MAX_CELERY_RETRIES=1`) and writes to `dlq_entries` on retry exhaustion; preserves the silent-skip return contract
+- `src/pumpwatch/db/models/{__init__,alert_sent}.py` — registers `DlqEntry`; `AlertSent.dispatch_attempts` column
+- `src/pumpwatch/db/repos/alert.py` — adds `list_recently_failed(window_seconds, max_attempts)` and `mark_redispatched(alert_id, *, success, error)`
+- `src/pumpwatch/celery_app.py` — adds `worker_init` + `beat_init` signal handlers that call `start_metrics_server`; adds Beat entries for `reconcile-failed-alerts` and `refresh-prometheus-gauges`; extends `autodiscover_tasks` to alerts + observability packages
+- `src/pumpwatch/alerts/subscriber.py` — `ALERTS_FIRED.labels(type=...).inc()` after persist; `ALERTS_SUPPRESSED.labels(reason=...).inc()` and `ALERTS_DELIVERY_FAILED.inc()` on the matching branches
+- `src/pumpwatch/{bot,alerts}/main.py` — call `start_metrics_server(...)` after settings load
+- `docker-compose.yml` — scheduler command now passes `--schedule /tmp/celerybeat-schedule` (writable by the non-root pumpwatch user); worker service env adds `PROMETHEUS_MULTIPROC_DIR=/tmp/pumpwatch-metrics`; new `prometheus` + `grafana` services behind `profiles: [observability]`, host-port-bound (9090, 3000)
+- `tests/{bot,scheduler,alerts}/conftest.py` and `tests/integration/{test_bot_flow,test_worker_price_ingestion_real_redis,test_alerts_real_redis}.py` — switched to the shared `truncating_sessionmaker` helper
+
 Session 4 modified:
 - `pyproject.toml` (+celery>=5.3,<6; +redis>=5.0; +mypy override for celery/kombu)
 - `uv.lock` regenerated
@@ -213,6 +240,41 @@ These were decided during design and should not be revisited without an ADR:
     user receive it" — the latter is reconstructible from `delivered`.
     Dedup TTL cooldowns: `*_HIT` = 1h (milestones, rare), `*_WARNING` =
     5m (heads-up, re-arm fast), `VOLUME_SPIKE` = 10m (between the two).
+18. **DLQ shape: Postgres `dlq_entries`, not a fifth Redis namespace.**
+    Persistent `fetch_token` failures land in a Postgres table with
+    `UNIQUE(token_address)` — re-failures bump `attempts` + `last_seen`
+    via on-conflict update. Inspectable with `psql`, durable, no FK to
+    `tokens` (DLQ rows must outlive token deletes). Celery-level retry
+    is manual (`self.retry` in the outer task body, capped at
+    `WORKER_FETCH_MAX_CELERY_RETRIES=1`) so the DLQ upsert lives in
+    exactly one branch and `attempts` cannot double-bump. This keeps
+    ADR #13 (four Redis roles only) intact.
+19. **Prometheus exposure: per-service `/metrics` endpoints.** Bot,
+    scheduler, worker, and alerts each bind `prometheus_client.start_http_server`
+    on their own port (9101–9104). The worker container sets
+    `PROMETHEUS_MULTIPROC_DIR=/tmp/pumpwatch-metrics` *before* Python
+    boots, which is what flips `prometheus_client` into multiproc mode
+    at Counter-construction time — the master `/metrics` endpoint
+    aggregates across the prefork pool via `MultiProcessCollector`.
+    Prometheus + Grafana ship behind a `--profile observability` flag
+    in compose; default `docker compose up` is unchanged.
+20. **DexScreener as ADR-#14 fallback source.** Implements the
+    `PriceDataSource` Protocol with full parity (Pump.fun `fetch_one`
+    + `fetch_batch`, tenacity retry, `api_call_log` writes). Selectable
+    via `PRICE_SOURCE=dexscreener`. Pair selection: highest-liquidity
+    Solana pair per requested address, since DexScreener returns pairs
+    across all chains/DEXes. `DexScreenerUnavailableError` shares the
+    `SourceUnavailableError` parent with `PumpFunUnavailableError`, so
+    the scheduler's retry/DLQ branch catches one symbol. Batch-mode
+    scheduler refactor (replacing per-token `fetch_token` with a real
+    multi-token call against the comma-list endpoint) is deferred to
+    Session 8 — at low cutover volume the per-token shape stays inside
+    DexScreener's ~5 rps published limit via the client's aiolimiter.
+21. **`price_snapshots` partitioning explicitly deferred to Session 8.**
+    Model docstring says "once row count exceeds ~10M". Dev/test/prod
+    cutover all near zero rows; daily partitioning is a one-revision
+    online migration when the time comes, not a destructive recreate
+    pre-deploy.
 
 ## Known Risks / Watch Items
 

@@ -1,8 +1,9 @@
-"""Bot-test fixtures: sessionmaker bound to the shared test engine.
+"""Bot-test fixtures: TRUNCATE-on-teardown sessionmaker via the shared helper.
 
-Bot handlers open their own sessions and commit — they cannot participate in
-the SAVEPOINT-based per-test rollback the other repo tests use. We isolate
-bot tests by TRUNCATING the tables they touch between tests instead.
+Bot handlers open their own sessions and commit, so we isolate by
+TRUNCATING after each test rather than relying on SAVEPOINT rollback.
+``truncate_on_entry=False`` preserves the legacy "cleanup only"
+behaviour the bot tests historically relied on.
 """
 
 from __future__ import annotations
@@ -10,21 +11,17 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from tests._helpers.sessionmaker import BOT_TABLES, truncating_sessionmaker
 
 
 @pytest_asyncio.fixture
 async def bot_sessionmaker(
     test_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Yield a sessionmaker bound to the session-scoped test engine, then truncate."""
-    maker = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    try:
+    """Yield a sessionmaker; TRUNCATE on teardown."""
+    async with truncating_sessionmaker(
+        test_engine, tables=BOT_TABLES, truncate_on_entry=False
+    ) as maker:
         yield maker
-    finally:
-        # Cascade wipes subscriptions + alerts_sent when users/tokens go.
-        async with test_engine.begin() as conn:
-            await conn.execute(
-                text("TRUNCATE users, tokens, price_snapshots RESTART IDENTITY CASCADE")
-            )

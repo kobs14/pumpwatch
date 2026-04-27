@@ -4,7 +4,7 @@ A production-grade, multi-user Telegram bot for monitoring Solana memecoin
 tokens via the Pump.fun API. Delivers real-time price threshold alerts and
 statistical volume-spike detection to users on their personal watchlists.
 
-> **Status:** Early development (Session 6 complete — alert engine subscribes to `pw:price.updated`, runs threshold + median+MAD detectors, dedupes, suppresses, persists, and dispatches via Telegram).
+> **Status:** Early development (Session 7 complete — added DexScreener fallback source, Postgres-backed DLQ + Celery retry/backoff, Beat-driven `delivery_error` reconciliation, per-service Prometheus `/metrics` + opt-in Grafana, fixed the scheduler `celerybeat-schedule` permission bug).
 
 ## Architecture (Planned)
 
@@ -140,6 +140,65 @@ docker compose exec postgres psql -U pumpwatch -d pumpwatch -c \
   "SELECT id, subscription_id, alert_type, delivered, delivery_error, created_at \
    FROM alerts_sent ORDER BY id DESC LIMIT 10;"
 ```
+
+## Hardening & operations (Session 7)
+
+### Worker DLQ — persistently failing tokens
+
+Transient `PumpFunUnavailableError` / `DexScreenerUnavailableError`
+get one Celery-level retry with exponential backoff
+(`WORKER_FETCH_MAX_CELERY_RETRIES=1` by default). On retry exhaustion
+the failure is upserted into `dlq_entries` with the original silent-skip
+return shape preserved so the scheduler's re-dispatch logic is unchanged.
+
+```bash
+# What's currently dead-lettered?
+docker compose exec postgres psql -U pumpwatch -d pumpwatch -c \
+  "SELECT token_address, attempts, first_seen, last_seen, error \
+   FROM dlq_entries ORDER BY last_seen DESC LIMIT 20;"
+```
+
+### Alert reconciliation
+
+A Beat-driven `pumpwatch.alerts.reconcile_failed` task runs every
+`ALERT_RECONCILE_INTERVAL_SECONDS` (default 5 min) and re-dispatches
+recently-failed `alerts_sent` rows. ADR #17 holds: rows whose
+`delivery_error` starts with `"suppressed:"` are never re-dispatched.
+Each row is touched at most twice (once live, once reconciled) — capped
+by `ALERT_RECONCILE_MAX_ATTEMPTS=1`.
+
+### DexScreener fallback source
+
+```bash
+PRICE_SOURCE=dexscreener docker compose up -d worker
+docker compose logs -f worker
+```
+
+Same Protocol as `PumpFunClient` — fetch_one + fetch_batch against
+`/latest/dex/tokens/{a,b,c}`, tenacity retry, `api_call_log` writes.
+Pair selection: highest-liquidity Solana pair per requested address.
+
+### Prometheus + Grafana (opt-in)
+
+```bash
+docker compose --profile observability up -d
+open http://localhost:9090   # Prometheus
+open http://localhost:3000   # Grafana (anonymous Viewer)
+```
+
+Per-service `/metrics` endpoints (bot:9101, scheduler:9102,
+worker:9103, alerts:9104) export:
+
+- `pumpwatch_alerts_fired_total{type}` — alerts persisted before suppression
+- `pumpwatch_alerts_suppressed_total{reason}`
+- `pumpwatch_alerts_delivery_failed_total`
+- `pumpwatch_source_calls_total{source,status}`
+- `pumpwatch_celery_queue_depth{queue}` (refreshed every 15s)
+- `pumpwatch_dlq_size`
+
+The pre-provisioned dashboard at `Dashboards → PumpWatch` covers all
+six metrics. The worker container sets `PROMETHEUS_MULTIPROC_DIR`
+so `prometheus_client` aggregates across the prefork pool.
 
 ## Development
 

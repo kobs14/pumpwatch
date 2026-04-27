@@ -77,3 +77,59 @@ class AlertRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_recently_failed(
+        self,
+        *,
+        window_seconds: int,
+        max_attempts: int,
+    ) -> list[AlertSent]:
+        """Return rows the reconciler should attempt to re-dispatch.
+
+        Filters:
+          - ``delivered = False`` (failed live-path delivery).
+          - ``delivery_error`` does not start with ``"suppressed:"`` —
+            ADR #17 forbids re-dispatching suppressed rows on unmute.
+          - ``dispatch_attempts <= max_attempts`` so each row is only
+            re-attempted up to the configured cap.
+          - ``created_at`` within ``window_seconds`` of now.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        stmt = (
+            select(AlertSent)
+            .where(AlertSent.delivered.is_(False))
+            .where(
+                (AlertSent.delivery_error.is_(None))
+                | (~AlertSent.delivery_error.like("suppressed:%"))
+            )
+            .where(AlertSent.dispatch_attempts <= max_attempts)
+            .where(AlertSent.created_at >= cutoff)
+            .order_by(AlertSent.created_at.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def mark_redispatched(
+        self,
+        alert_id: int,
+        *,
+        success: bool,
+        error: str | None,
+    ) -> None:
+        """Update an alert row after a reconciliation attempt.
+
+        Atomically increments ``dispatch_attempts`` and writes the
+        delivered/error fields. Used only by the reconciler — the live
+        path keeps using ``mark_delivered`` / ``mark_delivery_failed``
+        which leave ``dispatch_attempts`` at its initial value of 1.
+        """
+        stmt = (
+            update(AlertSent)
+            .where(AlertSent.id == alert_id)
+            .values(
+                delivered=success,
+                delivery_error=None if success else error,
+                dispatch_attempts=AlertSent.dispatch_attempts + 1,
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
