@@ -43,3 +43,6 @@ docker-compose.override.yml
 # Personal notes (not committed)
 NOTES.md
 NEXT_PROMPT.md
+
+# Claude Code — personal/machine-specific permission grants
+.claude/settings.local.json
