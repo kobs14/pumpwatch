@@ -220,3 +220,31 @@ mistake or make a better choice.
   **Action:** Defer to a future session. When upstream catches up, grep `no-untyped-call` and re-test.
 
 - **Lesson:** Total tests went from 173 (Session 6) to 210 (Session 7) — net +37 from 23 DexScreener client + factory tests, 3 DLQ repo tests, 2 scheduler DLQ tests, 7 reconciler tests, and 6 Prometheus / metrics tests. No flakiness in the integration suite once the `dlq_entries` truncate was added to the shared CORE_TABLES list.
+
+## Session 8 — 2026-04-27
+
+- **Lesson:** Fly.io's free tier was removed for new users in October 2024 — the platform is now pure pay-as-you-go. Managed Postgres starts at ~$38/mo, plus compute. PROJECT_STATUS's "Fly.io preferred" line predates the change.
+  **Context:** The deploy-target question for Session 8 became "where is the lights-on cost low enough to keep a portfolio piece reachable for years?" Fly + decoupled Postgres (Neon) + Upstash Redis still works on free tiers but Upstash's 10k cmds/day limit is tight given Beat fires every 30s plus pub-sub plus cache writes.
+  **Action:** Picked Hetzner CX22 (~€4.51/mo flat) + docker-compose + Caddy. Single VPS hosts everything; the existing compose file works unchanged. Predictable cost beat the free-tier story for a project that wants to stay live for years. Recipe in `docs/deployment.md`.
+
+- **Lesson:** Pydantic's `model_validator(mode="after")` runs at every `Settings()` construction — including from `os.environ` in tests — so cross-field invariants like "`BOT_WEBHOOK_URL` is required when `BOT_MODE=webhook`" land cleanly without a custom `field_validator`.
+  **Context:** Session 8 added `BOT_MODE: Literal["polling", "webhook"]` plus three webhook fields. The validator catches misconfiguration at first `get_settings()` call, which for the bot service is inside `run()` — before any HTTP server is bound. Tests verify the rejection by setting `BOT_MODE=webhook` without `BOT_WEBHOOK_URL` and asserting `pydantic.ValidationError`.
+  **Action:** `from typing import Self` + `@model_validator(mode="after") def _check(...) -> Self:`. Cleaner than checking inside `bot/main.py:run()` because every Settings consumer (e.g., a test that constructs a `Settings()` without going through `get_settings()`) gets the same guarantee.
+
+- **Lesson:** PTB v22's `Application.run_webhook(...)` accepts `secret_token=None` (the validator inside PTB allows it) — the optional Telegram-side secret is genuinely optional, so production can ship without it if the URL-path-as-secret is enough. We support both.
+  **Context:** The webhook smoke test originally always set `BOT_WEBHOOK_SECRET_TOKEN`; the test for "no secret" branch needed `monkeypatch.delenv` plus an assertion that `kwargs["secret_token"] is None`.
+  **Action:** Documented in `.env.example` that `BOT_WEBHOOK_SECRET_TOKEN` is optional. The deployment guide recommends generating one anyway (`secrets.token_urlsafe(32)`) — it's free defence-in-depth.
+
+- **Lesson:** `redis-py 7.4`'s `PubSub.aclose()` is *still* untyped in the shipped stubs as of 2026-04. Removed `# type: ignore[no-untyped-call]` at one site, ran `mypy --strict src tests`, got `Call to untyped function "aclose" in typed context`, reverted.
+  **Context:** Session 7 lessons.md flagged this as a future-strip candidate. Session 8's plan included an attempt; redis-py hasn't shipped a fix.
+  **Action:** Left the ignores in place across all five sites (1 src, 4 tests). Re-listed on `tasks/todo.md` for a future session when stubs catch up. The strip is a one-grep-and-replace — keep it cheap to retry.
+
+- **Lesson:** GitHub renders Mermaid `flowchart` and `sequenceDiagram` blocks natively in `README.md`. No build step needed. Tested by previewing the README on the gh-pages-equivalent (`gh repo view --web`).
+  **Context:** Session 8 added three Mermaid diagrams to the README (topology, ingestion flow, alert flow). The portfolio framing depends on these rendering correctly without a workflow. They do, on GitHub at least; some other Markdown renderers (e.g., crates.io) require a plugin.
+  **Action:** Diagrams live in the README with no toolchain. If we ever switch to a Markdown renderer that doesn't support Mermaid, fall back to the prerendered SVGs that the GitHub Action `mermaid-cli` can produce.
+
+- **Lesson:** Deleting `src/pumpwatch/services/` (5 docstring-only `__init__.py` files) and `src/pumpwatch/main.py` (the Session-1 idle placeholder) required updating the `Dockerfile`'s `CMD` because it pointed at `pumpwatch.main`. Compose always overrides per-service, so the `CMD` is only the "image launched without an override" fallback. Made it fail fast (`sys.exit(2)` with a friendly message) instead of pointing at a deleted module.
+  **Context:** A `CMD ["python", "-m", "pumpwatch.main"]` against a deleted module would crash inside the image, confusing whoever ran a forgotten `docker run pumpwatch:latest`. Better to fail with a sentence explaining why.
+  **Action:** Pattern: `CMD ["python", "-c", "import sys; sys.stderr.write('...needs an explicit per-service command\\n'); sys.exit(2)"]`. For multi-service images consumed exclusively via compose's `command:` override, this is the right shape.
+
+- **Lesson:** Test count after Session 8: 214 (210 from Session 7 + 4 webhook smoke tests). The cleanup didn't delete any tests; the `services/` placeholders were never imported, never tested.

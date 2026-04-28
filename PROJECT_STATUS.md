@@ -5,9 +5,9 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Post-Session 7
-**Last Session Completed:** Session 7 — Hardening: Observability, Error Handling, Scale
-**Next Session:** Session 8 — Documentation, README, Deployment Guide
+**Phase:** Released / Documented
+**Last Session Completed:** Session 8 — Documentation, README, Deployment Guide
+**Next Session:** None planned. See `tasks/todo.md` for the public post-launch backlog.
 **Last Updated:** 2026-04-27
 
 ## Session Plan
@@ -22,7 +22,7 @@ It is updated at the end of every session.
 | 5  | Worker Pool & Price Ingestion                   | ✅ done | fetch_token writes PriceSnapshot + pw:price:<addr> hot cache (tier-varying TTL) + pw:price.updated pub-sub; PRICE_SOURCE setting + factory; silent-skip on PumpFunUnavailableError; best-effort cache/pub-sub; fakeredis unit + real-Redis integration tests (39 new) |
 | 6  | Alert Engine: Thresholds + Volume Spike         | ✅ done | `alerts` service: subscribe to `pw:price.updated`, threshold + median+MAD detectors, Redis-TTL dedup under `pw:alert:*`, suppression (mute/PAUSED/quiet-hours w/ tz + DST), persist-then-dispatch via standalone `telegram.Bot`, 47 new tests |
 | 7  | Hardening: Observability, Error Handling, Scale | ✅ done | DexScreener client, Postgres `dlq_entries` + Celery retry/backoff, alert reconciliation Beat sweep, per-service Prometheus `/metrics` + Grafana profile, `celerybeat-schedule` permission fix, fixture consolidation. 210 tests. |
-| 8  | Documentation, README, Deployment Guide         | ⬜      | Architecture diagrams, ADRs, deploy guide |
+| 8  | Documentation, README, Deployment Guide         | ✅ done | 10 ADR files, Mermaid-diagrammed README, Hetzner deployment recipe, webhook bot mode (`BOT_MODE`), partition migration plan, Session-1 placeholder cleanups |
 
 ## Files Created So Far
 
@@ -135,6 +135,28 @@ Session 7:
 - `tests/_helpers/{__init__,sessionmaker}.py` — shared `truncating_sessionmaker` helper (CORE_TABLES / BOT_TABLES presets); replaces five duplicated truncate-style fixtures
 - `tests/sources/test_dexscreener_client.py`, `tests/db/test_dlq_repo.py`, `tests/alerts/test_reconciler.py`, `tests/observability/test_metrics.py` — 37 new tests (210 total, +37 from Session 6 baseline)
 
+Session 8:
+- `docs/adr/README.md` — ADR index
+- `docs/adr/008-bot-long-polling-default.md`, `012-priority-on-subscription.md`, `013-redis-roles.md`, `014-fallback-source-policy.md`, `015-worker-subscription-agnostic.md`, `016-telegram-dispatch-shape.md`, `017-suppress-but-still-persist.md`, `018-dlq-postgres-not-redis.md`, `019-prometheus-per-service.md`, `020-dexscreener-as-fallback.md`
+- `docs/deployment.md` — Hetzner + docker-compose + Caddy recipe end-to-end
+- `docs/migrations/partition-price-snapshots.md` — ready-to-run plan when row count > ~1M
+- `tests/bot/test_main_webhook_mode.py` — webhook mode smoke tests (4 cases)
+
+Session 8 modified:
+- `src/pumpwatch/config.py` — `BOT_MODE` (Literal polling|webhook), `BOT_WEBHOOK_URL`, `BOT_WEBHOOK_PORT`, `BOT_WEBHOOK_SECRET_TOKEN` + `model_validator` enforcing `BOT_WEBHOOK_URL` when `BOT_MODE=webhook`
+- `src/pumpwatch/bot/main.py` — `run()` dispatches to `run_polling()` (default) or `run_webhook(...)` based on `BOT_MODE`
+- `.env.example` — Bot transport block (BOT_MODE + webhook fields) after `TELEGRAM_BOT_TOKEN`
+- `README.md` — full revamp: elevator pitch, tech-stack callout, three Mermaid diagrams (topology, ingestion, alert flow), Deployment + ADR links; preserved all Session 5–7 operational sections
+- `Dockerfile` — `CMD` no longer points at the deleted `pumpwatch.main`; image now fails fast if launched without an explicit per-service command override (compose always supplies one)
+- `docker-compose.yml` — removed dead `app` service (Session-1 placeholder)
+- `PROJECT_STATUS.md` (this file) — Phase → Released; Architectural Decisions section restructured around the ADR files
+- `tasks/todo.md` — reset to public-facing post-launch backlog
+- `tasks/lessons.md` — Session 8 entries
+
+Session 8 deleted:
+- `src/pumpwatch/services/{__init__.py, bot/__init__.py, scheduler/__init__.py, worker/__init__.py, alerts/__init__.py}` — Session-1 placeholder tree, never imported anywhere
+- `src/pumpwatch/main.py` — Session-1 idle placeholder; `Dockerfile`'s `CMD` no longer references it
+
 Session 7 modified:
 - `pyproject.toml` (+prometheus-client>=0.20)
 - `uv.lock` regenerated
@@ -170,7 +192,27 @@ Session 4 modified:
 
 ## Architectural Decisions Locked
 
-These were decided during design and should not be revisited without an ADR:
+Decisions worth more than two sentences are formalised in
+[`docs/adr/`](docs/adr/) (Context / Decision / Consequences format,
+per CLAUDE.md). One-line decisions stay inline below as a
+quick-reference index.
+
+### ADR files (`docs/adr/NNN-title.md`)
+
+| #   | Title                                                                                  |
+|-----|----------------------------------------------------------------------------------------|
+| 008 | [Bot uses long-polling by default; webhook is opt-in](docs/adr/008-bot-long-polling-default.md) |
+| 012 | [Priority lives on `Subscription`, not `Token`](docs/adr/012-priority-on-subscription.md) |
+| 013 | [Single Redis instance, four roles](docs/adr/013-redis-roles.md)                       |
+| 014 | [Fallback-source policy via `PriceDataSource` factory](docs/adr/014-fallback-source-policy.md) |
+| 015 | [Worker is subscription-agnostic](docs/adr/015-worker-subscription-agnostic.md)        |
+| 016 | [Alerts service holds its own `telegram.Bot`](docs/adr/016-telegram-dispatch-shape.md) |
+| 017 | [Suppress but still persist; still mark fired](docs/adr/017-suppress-but-still-persist.md) |
+| 018 | [DLQ is a Postgres table, not a fifth Redis namespace](docs/adr/018-dlq-postgres-not-redis.md) |
+| 019 | [Per-service Prometheus `/metrics` endpoints](docs/adr/019-prometheus-per-service.md)  |
+| 020 | [DexScreener as the ADR-014 fallback source](docs/adr/020-dexscreener-as-fallback.md)  |
+
+### Inline quick-reference
 
 1. **Five-service architecture:** bot, scheduler, workers, alerts, plus
    Postgres + Redis. Not a monolith.
@@ -178,16 +220,13 @@ These were decided during design and should not be revisited without an ADR:
 3. **Scheduler is single-instance; workers are horizontally scalable.**
 4. **All external data sources sit behind a `PriceDataSource` interface.**
    Pump.fun is the first implementation; DexScreener is the documented
-   fallback if Pump.fun goes dark.
+   fallback if Pump.fun goes dark. (See ADR-014.)
 5. **Volume-spike detection uses median + MAD (not mean + stddev)** because
    crypto volume distributions have fat tails and outliers.
 6. **Priority tiers are computed, not assigned:** based on distance to
    threshold, recent volatility, and recent volume.
 7. **Telegram has its own outbound rate limiter** (per-chat token bucket)
    independent of the Pump.fun rate limiter.
-8. **Bot uses long-polling, not webhook.** Webhook deployment is a Session 8
-   concern. `ConversationHandler` state is in-memory per-process, which is why
-   the bot is a single-instance service; Redis-backed persistence is deferred.
 9. **`/add` validates mint format only.** On-chain existence and metadata
    (`symbol`, `name`) are hydrated by the data-source layer when the
    scheduler polls — the bot never talks to Pump.fun directly.
@@ -198,83 +237,9 @@ These were decided during design and should not be revisited without an ADR:
     long-running asyncio scheduler loop alongside Beat was rejected as an
     unnecessary second moving part at current scale. Beat fires one task,
     the task rebuilds the batch and dispatches.
-12. **Priority lives on `Subscription.priority`, not `Token`.** The schema
-    already had a `Priority` enum and a per-subscription priority column.
-    Session 4 reuses both: each sub gets a tier computed from its own
-    thresholds; the batch builder picks `max(priority)` across subs per
-    token to drive dispatch routing. A token-level `priority_tier` column
-    was considered and rejected to avoid duplicating state.
-13. **Redis roles.** Single Redis instance, four roles: Celery broker,
-    Celery result backend, hot cache (`pw:price:<addr>` flat JSON with
-    tier-varying TTL — HIGH=60s, MEDIUM=300s, LOW=900s), pub-sub
-    (`pw:price.updated` single global channel; payload includes
-    `{address, ts, source, tier, cache_key}` and subscribers filter
-    in-process). No further Redis roles without an ADR.
-14. **Fallback-source policy.** A `build_source(sessionmaker)` factory
-    gates on `Settings.PRICE_SOURCE` (values: `pumpfun`, `fake`). A real
-    DexScreener `PriceDataSource` implementation is deferred to Session 7
-    hardening; the factory seam is ready for a one-line addition.
-    `FakePriceDataSource` is dev-only; tests monkey-patch `_build_source`
-    in `scheduler/tasks.py` directly rather than flipping the setting.
-15. **Worker is subscription-agnostic.** The `fetch_token` worker writes a
-    `PriceSnapshot` row + hot cache + pub-sub event unconditionally when
-    the source returns data. It reads `Subscription.priority` only to
-    derive the cache TTL and the event `tier` field. User-mute,
-    quiet-hours, and `PAUSED` suppression all live at alert-dispatch
-    time in Session 6 — not in the worker.
-16. **Telegram dispatch shape: standalone `telegram.Bot` in the alerts
-    service.** The bot service still owns `getUpdates` (long-polling);
-    the alerts service holds its own `telegram.Bot` instance against
-    the same token and only sends. Two processes sharing the token is
-    safe because Telegram only conflicts on Update consumption — outbound
-    HTTP is unconstrained beyond the documented rate limits, which we
-    enforce with one global + per-chat `aiolimiter` pair. Alternatives
-    considered (Redis outbox + bot drain, or refactoring `bot/` into a
-    shared library) were rejected as either adding hops or introducing
-    a single-process bottleneck for a horizontally scalable concern.
-17. **Suppress-but-still-persist + still-mark-fired.** Muted /
-    quiet-hours / `PAUSED` alerts hit `alerts_sent` with `delivered=False`
-    and `delivery_error="suppressed: <reason>"`; the Redis dedup TTL key
-    is set just like a delivered alert. Reason: unmute should not replay
-    a thundering herd of stale warnings. Audit trail wins over "did the
-    user receive it" — the latter is reconstructible from `delivered`.
-    Dedup TTL cooldowns: `*_HIT` = 1h (milestones, rare), `*_WARNING` =
-    5m (heads-up, re-arm fast), `VOLUME_SPIKE` = 10m (between the two).
-18. **DLQ shape: Postgres `dlq_entries`, not a fifth Redis namespace.**
-    Persistent `fetch_token` failures land in a Postgres table with
-    `UNIQUE(token_address)` — re-failures bump `attempts` + `last_seen`
-    via on-conflict update. Inspectable with `psql`, durable, no FK to
-    `tokens` (DLQ rows must outlive token deletes). Celery-level retry
-    is manual (`self.retry` in the outer task body, capped at
-    `WORKER_FETCH_MAX_CELERY_RETRIES=1`) so the DLQ upsert lives in
-    exactly one branch and `attempts` cannot double-bump. This keeps
-    ADR #13 (four Redis roles only) intact.
-19. **Prometheus exposure: per-service `/metrics` endpoints.** Bot,
-    scheduler, worker, and alerts each bind `prometheus_client.start_http_server`
-    on their own port (9101–9104). The worker container sets
-    `PROMETHEUS_MULTIPROC_DIR=/tmp/pumpwatch-metrics` *before* Python
-    boots, which is what flips `prometheus_client` into multiproc mode
-    at Counter-construction time — the master `/metrics` endpoint
-    aggregates across the prefork pool via `MultiProcessCollector`.
-    Prometheus + Grafana ship behind a `--profile observability` flag
-    in compose; default `docker compose up` is unchanged.
-20. **DexScreener as ADR-#14 fallback source.** Implements the
-    `PriceDataSource` Protocol with full parity (Pump.fun `fetch_one`
-    + `fetch_batch`, tenacity retry, `api_call_log` writes). Selectable
-    via `PRICE_SOURCE=dexscreener`. Pair selection: highest-liquidity
-    Solana pair per requested address, since DexScreener returns pairs
-    across all chains/DEXes. `DexScreenerUnavailableError` shares the
-    `SourceUnavailableError` parent with `PumpFunUnavailableError`, so
-    the scheduler's retry/DLQ branch catches one symbol. Batch-mode
-    scheduler refactor (replacing per-token `fetch_token` with a real
-    multi-token call against the comma-list endpoint) is deferred to
-    Session 8 — at low cutover volume the per-token shape stays inside
-    DexScreener's ~5 rps published limit via the client's aiolimiter.
-21. **`price_snapshots` partitioning explicitly deferred to Session 8.**
-    Model docstring says "once row count exceeds ~10M". Dev/test/prod
-    cutover all near zero rows; daily partitioning is a one-revision
-    online migration when the time comes, not a destructive recreate
-    pre-deploy.
+21. **`price_snapshots` partitioning deferred until row count > ~1M.**
+    Empty pre-deploy. The ready-to-run plan is in
+    [`docs/migrations/partition-price-snapshots.md`](docs/migrations/partition-price-snapshots.md).
 
 ## Known Risks / Watch Items
 
@@ -297,6 +262,9 @@ These were decided during design and should not be revisited without an ADR:
 
 ## Deployment Target
 
-To be decided in Session 8. Candidates: Fly.io (preferred for managed
-Postgres + simple Docker deploys) or Railway. Local dev is always Docker
-Compose.
+Production: Hetzner CX22 (~$5/mo flat) + docker-compose + Caddy
+reverse-proxy. Single VPS hosts every service plus colocated
+Postgres + Redis. The full recipe — provisioning, hardening, secrets,
+HTTPS, observability access, backups, rollback — is in
+[`docs/deployment.md`](docs/deployment.md). Local dev is always
+Docker Compose; the same `docker-compose.yml` works in both contexts.

@@ -28,4 +28,6 @@ ENV PYTHONPATH=/app/src
 
 USER pumpwatch
 
-CMD ["python", "-m", "pumpwatch.main"]
+# Each compose service supplies its own command (e.g. `python -m pumpwatch.bot.main`).
+# This default fails fast if the image is launched without an override.
+CMD ["python", "-c", "import sys; sys.stderr.write('pumpwatch image needs an explicit per-service command\\n'); sys.exit(2)"]

@@ -1,44 +1,45 @@
-# Current Session TODO
+# Post-launch backlog
 
-This file is session-scoped. It is reset at the end of every session with
-the next session's name and any carry-over items.
+The eight planned sessions are complete. The repo is feature-complete
+and deployable per [`docs/deployment.md`](../docs/deployment.md). The
+items below are public, optional, and trigger-driven — none of them
+block the released system from operating.
 
-## Active: Session 8 — Documentation, README, Deployment Guide
+## When the trigger fires
 
-### Carry-over from Session 7
+- **`price_snapshots` partitioning** — when row count > ~1M.
+  Ready-to-run plan: [`docs/migrations/partition-price-snapshots.md`](../docs/migrations/partition-price-snapshots.md).
+- **DexScreener batch-mode scheduler refactor** — when observed
+  HIGH-tier load saturates DexScreener's ~5 rps. Touches
+  `scheduler/tasks.py`, `scheduler/batch.py`, and the `PriceDataSource`
+  Protocol.
+- **`pumpwatch_cache_hit_ratio` metric** — when a hot-cache *reader*
+  exists (e.g., `/list` enriches rows from cache, or the alerts
+  subscriber prefers cache over pub-sub payload). The cache is
+  currently write-only.
+- **Strip `# type: ignore[no-untyped-call]` on `pubsub.aclose()`** —
+  attempted in Session 8; redis-py 7.4 stubs still don't type
+  `PubSub.aclose()`. Re-attempt when stubs catch up. Sites:
+  `src/pumpwatch/alerts/subscriber.py`, `tests/cache/test_redis_client.py`,
+  `tests/integration/test_worker_price_ingestion_real_redis.py`,
+  `tests/scheduler/test_tasks.py`.
+- **Redis-backed `ConversationHandler` persistence** — only needed if
+  the bot goes multi-instance. Single-instance polling/webhook is the
+  documented shape (ADR-008).
 
-- `price_snapshots` daily partitioning. Model docstring still says
-  "once row count exceeds ~10M". Empty pre-deploy; do this as a
-  one-revision online migration (declarative `RANGE(ts)`, parent + N
-  children, Beat task creates tomorrow's child at midnight) when
-  volume warrants.
-- DexScreener batch-mode scheduler refactor. Session 7 ships
-  per-token `fetch_token` against DexScreener's comma-list endpoint
-  (each call hits `/latest/dex/tokens/{single_addr}`). Real batching
-  would dispatch one Celery task per (priority, batch) instead of
-  per token. Touches `scheduler/tasks.py`, `scheduler/batch.py`,
-  and the `PriceDataSource` Protocol. Worth doing only if observed
-  HIGH-tier load actually saturates DexScreener's ~5 rps.
-- `pumpwatch_cache_hit_ratio` metric. Deferred from Session 7 — the
-  hot cache (`pw:price:<addr>`) is currently write-only. Add the
-  metric when a reader exists (e.g., `/list` enriches rows from
-  cache, or the alerts subscriber prefers cache over pub-sub
-  payload).
-- Webhook deployment for the bot. Long-polling is fine for dev /
-  single-instance; webhook is the productionised shape for Session 8.
-- ADR formalisation in `docs/adr/`. ADRs #13–#21 currently live
-  inline in `PROJECT_STATUS.md`; the deployment guide should split
-  them into per-decision files with context / decision / consequences.
-- Architecture diagrams (Mermaid in README): the five-service shape,
-  the pub-sub flow, the Beat schedule.
-- Drop the `# type: ignore[no-untyped-call]` on `pubsub.aclose()`
-  once redis-py stubs catch up. (`Redis.aclose()` already typed.)
+## Open product features
 
-### Future cleanup (still open)
+- **Per-subscription editing in `/settings`** (inline keyboards per
+  watched token). UI feature, deployment-orthogonal.
+- **LLM-driven `/explain` command** — mentioned at design time as a
+  possible Session 9; not committed.
 
-- Remove empty `src/pumpwatch/services/{bot,scheduler,worker,alerts}/`
-  placeholders. Session 1 created them; Sessions 3–7 superseded them
-  (real packages live one level up at `src/pumpwatch/{bot,scheduler,
-  cache,alerts,observability}/`).
-- Per-subscription editing in `/settings` (inline keyboards per token).
-- Redis-backed `ConversationHandler` persistence when multi-instance.
+## Observations to track in production
+
+- Cloudflare block on Pump.fun's frontend API (Session 2 lessons).
+  If it lifts, `PRICE_SOURCE=pumpfun` becomes viable again. Until
+  then, `PRICE_SOURCE=dexscreener` is the documented default for
+  prod.
+- `pumpwatch_alerts_delivery_failed_total` and `pumpwatch_dlq_size`
+  should both be near zero in steady state. Spikes on either are
+  the operational signal that something upstream is unhealthy.

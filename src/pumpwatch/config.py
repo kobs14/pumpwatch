@@ -2,9 +2,9 @@
 
 from decimal import Decimal
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import PostgresDsn, RedisDsn
+from pydantic import PostgresDsn, RedisDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     DATABASE_URL: PostgresDsn
     REDIS_URL: RedisDsn
     TELEGRAM_BOT_TOKEN: str
+
+    # Bot transport. ``polling`` is the default (works without a public
+    # URL — fine for dev compose and single-instance prod). ``webhook``
+    # is the productionised shape; see docs/deployment.md and ADR #8.
+    BOT_MODE: Literal["polling", "webhook"] = "polling"
+    BOT_WEBHOOK_URL: str | None = None
+    BOT_WEBHOOK_PORT: int = 8443
+    BOT_WEBHOOK_SECRET_TOKEN: str | None = None
 
     # Pump.fun API
     PUMPFUN_BASE_URL: str = "https://frontend-api.pump.fun"
@@ -114,6 +122,12 @@ class Settings(BaseSettings):
     METRICS_PORT_ALERTS: int = 9104
     METRICS_GAUGE_REFRESH_SECONDS: int = 15
     PROMETHEUS_MULTIPROC_DIR: str = "/tmp/pumpwatch-metrics"
+
+    @model_validator(mode="after")
+    def _check_webhook_url_when_webhook_mode(self) -> Self:
+        if self.BOT_MODE == "webhook" and not self.BOT_WEBHOOK_URL:
+            raise ValueError("BOT_WEBHOOK_URL is required when BOT_MODE=webhook")
+        return self
 
 
 @lru_cache

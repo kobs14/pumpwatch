@@ -27,26 +27,6 @@ services:
       timeout: 5s
       retries: 5
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    env_file:
-      - .env
-    command: python -m pumpwatch.main
-    volumes:
-      - ./src:/app/src
-    healthcheck:
-      test: ["CMD", "python", "-c", "import pumpwatch; print(pumpwatch.__version__)"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
   bot:
     build:
       context: .
