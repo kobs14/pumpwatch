@@ -248,3 +248,9 @@ mistake or make a better choice.
   **Action:** Pattern: `CMD ["python", "-c", "import sys; sys.stderr.write('...needs an explicit per-service command\\n'); sys.exit(2)"]`. For multi-service images consumed exclusively via compose's `command:` override, this is the right shape.
 
 - **Lesson:** Test count after Session 8: 214 (210 from Session 7 + 4 webhook smoke tests). The cleanup didn't delete any tests; the `services/` placeholders were never imported, never tested.
+
+## Session 9 — 2026-04-28
+
+- **Lesson:** The session prompt assumed `actions/checkout@v4`, `astral-sh/setup-uv@v3`, and `docker/setup-buildx-action@v3`. As of April 2026 the current major tags are `@v6`, `@v8`, and `@v4` respectively. Always web-check action versions before writing the workflow — major-tag drift accumulates faster than expected.
+  **Context:** Pre-session exploration caught the mismatch before any YAML was written.
+  **Action:** Used the current versions. No functional difference for our use case, but pinning to stale majors would have missed security patches and cache improvements in `setup-uv`.

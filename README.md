@@ -1,5 +1,7 @@
 # PumpWatch
 
+[![CI](https://github.com/kobs14/pumpwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/kobs14/pumpwatch/actions/workflows/ci.yml)
+
 Multi-user Telegram bot that watches Solana memecoin tokens on
 Pump.fun / DexScreener and fires real-time **price-threshold** and
 **statistical volume-spike** alerts to each user's personal watchlist.

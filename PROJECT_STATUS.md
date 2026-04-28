@@ -5,10 +5,10 @@ It is updated at the end of every session.
 
 ## Current State
 
-**Phase:** Released / Documented
-**Last Session Completed:** Session 8 — Documentation, README, Deployment Guide
+**Phase:** Released / Documented + CI
+**Last Session Completed:** Session 9 — GitHub Actions CI
 **Next Session:** None planned. See `tasks/todo.md` for the public post-launch backlog.
-**Last Updated:** 2026-04-27
+**Last Updated:** 2026-04-28
 
 ## Session Plan
 
@@ -23,6 +23,7 @@ It is updated at the end of every session.
 | 6  | Alert Engine: Thresholds + Volume Spike         | ✅ done | `alerts` service: subscribe to `pw:price.updated`, threshold + median+MAD detectors, Redis-TTL dedup under `pw:alert:*`, suppression (mute/PAUSED/quiet-hours w/ tz + DST), persist-then-dispatch via standalone `telegram.Bot`, 47 new tests |
 | 7  | Hardening: Observability, Error Handling, Scale | ✅ done | DexScreener client, Postgres `dlq_entries` + Celery retry/backoff, alert reconciliation Beat sweep, per-service Prometheus `/metrics` + Grafana profile, `celerybeat-schedule` permission fix, fixture consolidation. 210 tests. |
 | 8  | Documentation, README, Deployment Guide         | ✅ done | 10 ADR files, Mermaid-diagrammed README, Hetzner deployment recipe, webhook bot mode (`BOT_MODE`), partition migration plan, Session-1 placeholder cleanups |
+| 9  | GitHub Actions CI                                | ✅ done | GitHub Actions CI: ruff + mypy strict + pytest with Postgres + Redis service containers + Dockerfile build verification |
 
 ## Files Created So Far
 
@@ -156,6 +157,15 @@ Session 8 modified:
 Session 8 deleted:
 - `src/pumpwatch/services/{__init__.py, bot/__init__.py, scheduler/__init__.py, worker/__init__.py, alerts/__init__.py}` — Session-1 placeholder tree, never imported anywhere
 - `src/pumpwatch/main.py` — Session-1 idle placeholder; `Dockerfile`'s `CMD` no longer references it
+
+Session 9:
+- `.github/workflows/ci.yml` — GitHub Actions CI workflow (lint, test, docker-build)
+
+Session 9 modified:
+- `README.md` — CI status badge
+- `PROJECT_STATUS.md` (this file) — Session 9 row, Phase + CI
+- `tasks/lessons.md` — Session 9 entries
+- `NEXT_PROMPT.md` — cleared to placeholder
 
 Session 7 modified:
 - `pyproject.toml` (+prometheus-client>=0.20)
